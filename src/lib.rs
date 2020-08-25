@@ -152,8 +152,8 @@ pub mod termdict;
 mod reader;
 
 pub use self::reader::{IndexReader, IndexReaderBuilder, ReloadPolicy};
-mod snippet;
-pub use self::snippet::{Snippet, SnippetGenerator};
+mod highlighter;
+pub use self::highlighter::{HighlightRange, HighlightRangesGenerator};
 
 mod docset;
 pub use self::docset::{DocSet, TERMINATED};
