@@ -29,7 +29,10 @@ where
         }
     }
 
-    fn automaton_stream<'a>(&'a self, term_dict: &'a TermDictionary) -> TermStreamer<'a, &'a A> {
+    pub(crate) fn automaton_stream<'a>(
+        &'a self,
+        term_dict: &'a TermDictionary,
+    ) -> TermStreamer<'a, &'a A> {
         let automaton: &A = &*self.automaton;
         let term_stream_builder = term_dict.search(automaton);
         term_stream_builder.into_stream()

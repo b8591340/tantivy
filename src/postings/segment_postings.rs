@@ -175,7 +175,6 @@ impl DocSet for SegmentPostings {
     }
 
     fn seek(&mut self, target: DocId) -> DocId {
-        debug_assert!(self.doc() <= target);
         if self.doc() >= target {
             return self.doc();
         }

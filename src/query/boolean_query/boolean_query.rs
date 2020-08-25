@@ -1,10 +1,12 @@
 use super::boolean_weight::BooleanWeight;
+use crate::postings::TermInfo;
 use crate::query::Occur;
 use crate::query::Query;
 use crate::query::TermQuery;
 use crate::query::Weight;
-use crate::schema::IndexRecordOption;
 use crate::schema::Term;
+use crate::schema::{Field, IndexRecordOption};
+use crate::termdict::TermDictionary;
 use crate::Searcher;
 use std::collections::BTreeSet;
 
@@ -159,9 +161,14 @@ impl Query for BooleanQuery {
         Ok(Box::new(BooleanWeight::new(sub_weights, scoring_enabled)))
     }
 
-    fn query_terms(&self, term_set: &mut BTreeSet<Term>) {
+    fn terminfos(
+        &self,
+        terminfo_set: &mut BTreeSet<TermInfo>,
+        term_dict: &TermDictionary,
+        field: Field,
+    ) {
         for (_occur, subquery) in &self.subqueries {
-            subquery.query_terms(term_set);
+            subquery.terminfos(terminfo_set, term_dict, field)
         }
     }
 }

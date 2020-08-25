@@ -2,15 +2,18 @@ use crate::collector::Collector;
 use crate::core::Executor;
 use crate::core::InvertedIndexReader;
 use crate::core::SegmentReader;
+use crate::docset::DocSet;
+use crate::postings::Postings;
 use crate::query::Query;
-use crate::schema::Document;
-use crate::schema::Schema;
+use crate::schema::{Document, IndexRecordOption};
 use crate::schema::{Field, Term};
+use crate::schema::{FieldType, Schema, Type};
 use crate::space_usage::SearcherSpaceUsage;
 use crate::store::StoreReader;
 use crate::termdict::TermMerger;
 use crate::DocAddress;
 use crate::Index;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
@@ -155,6 +158,40 @@ impl Searcher {
             .map(|segment_reader| segment_reader.inverted_index(field))
             .collect::<Vec<_>>();
         FieldSearcher::new(inv_index_readers)
+    }
+
+    /// Return the positions of the given `DocAddress`, `Field`, `Query` combination
+    /// for a `DocAddress` returned by `Query` wherein `Field` appears at least once.
+    ///
+    /// Requires the text field to be indexed with `IndexRecordOption::WithFreqsAndPositions`.
+    pub fn positions(&self, query: &dyn Query, field: Field, address: DocAddress) -> Vec<u32> {
+        debug_assert!(self
+            .schema
+            .get_field_entry(field)
+            .field_type()
+            .get_index_record_option()
+            .map(|it| it.has_positions())
+            .unwrap_or(false));
+        let DocAddress(segment_ord, doc_id) = address;
+        let segment_reader = self.segment_reader(segment_ord);
+        let inverted_index = segment_reader.inverted_index(field);
+        let term_dict = inverted_index.terms();
+        let mut terminfos = BTreeSet::new();
+        query.terminfos(&mut terminfos, term_dict, field);
+        terminfos
+            .into_iter()
+            .flat_map(move |term_info| {
+                let mut postings = inverted_index.read_postings_from_terminfo(
+                    &term_info,
+                    IndexRecordOption::WithFreqsAndPositions,
+                );
+                let mut positions = vec![];
+                if postings.seek(doc_id) == doc_id {
+                    postings.positions(&mut positions);
+                }
+                positions
+            })
+            .collect()
     }
 
     /// Summarize total space usage of this searcher.
