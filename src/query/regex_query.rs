@@ -1,8 +1,11 @@
 use crate::error::TantivyError;
+use crate::postings::TermInfo;
 use crate::query::{AutomatonWeight, Query, Weight};
 use crate::schema::Field;
+use crate::termdict::TermDictionary;
 use crate::Searcher;
 use std::clone::Clone;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tantivy_fst::Regex;
 
@@ -83,6 +86,21 @@ impl Query for RegexQuery {
         _scoring_enabled: bool,
     ) -> crate::Result<Box<dyn Weight>> {
         Ok(Box::new(self.specialized_weight()))
+    }
+
+    fn terminfos(
+        &self,
+        terminfo_set: &mut BTreeSet<TermInfo>,
+        term_dict: &TermDictionary,
+        field: Field,
+    ) {
+        if self.field == field {
+            let automaton = self.specialized_weight();
+            let mut term_stream = automaton.automaton_stream(term_dict);
+            while term_stream.advance() {
+                terminfo_set.insert(term_stream.value().clone());
+            }
+        }
     }
 }
 

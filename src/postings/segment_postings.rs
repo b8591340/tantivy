@@ -24,8 +24,8 @@ use crate::postings::BlockSegmentPostings;
 #[derive(Clone)]
 pub struct SegmentPostings {
     pub(crate) block_cursor: BlockSegmentPostings,
-    cur: usize,
-    position_reader: Option<PositionReader>,
+    pub(crate) cur: usize,
+    pub(crate) position_reader: Option<PositionReader>,
     block_searcher: BlockSearcher,
 }
 
@@ -175,7 +175,6 @@ impl DocSet for SegmentPostings {
     }
 
     fn seek(&mut self, target: DocId) -> DocId {
-        debug_assert!(self.doc() <= target);
         if self.doc() >= target {
             return self.doc();
         }
