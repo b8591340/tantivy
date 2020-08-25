@@ -1,10 +1,12 @@
+use crate::postings::TermInfo;
 use crate::query::{AutomatonWeight, Query, Weight};
-use crate::schema::Term;
+use crate::schema::{Field, Term};
+use crate::termdict::TermDictionary;
 use crate::Searcher;
 use crate::TantivyError::InvalidArgument;
 use levenshtein_automata::{Distance, LevenshteinAutomatonBuilder, DFA};
 use once_cell::sync::Lazy;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 use tantivy_fst::Automaton;
 
@@ -157,6 +159,23 @@ impl Query for FuzzyTermQuery {
         _scoring_enabled: bool,
     ) -> crate::Result<Box<dyn Weight>> {
         Ok(Box::new(self.specialized_weight()?))
+    }
+
+    fn terminfos(
+        &self,
+        terminfo_set: &mut BTreeSet<TermInfo>,
+        term_dict: &TermDictionary,
+        field: Field,
+    ) {
+        if self.term.field() == field {
+            let automaton = self
+                .specialized_weight()
+                .expect("correct Levenshtein distance");
+            let mut term_stream = automaton.automaton_stream(term_dict);
+            while term_stream.advance() {
+                terminfo_set.insert(term_stream.value().clone());
+            }
+        }
     }
 }
 
