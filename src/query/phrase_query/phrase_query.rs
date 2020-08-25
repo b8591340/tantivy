@@ -1,10 +1,12 @@
 use super::PhraseWeight;
 use crate::core::searcher::Searcher;
+use crate::postings::TermInfo;
 use crate::query::bm25::BM25Weight;
 use crate::query::Query;
 use crate::query::Weight;
 use crate::schema::IndexRecordOption;
 use crate::schema::{Field, Term};
+use crate::termdict::TermDictionary;
 use std::collections::BTreeSet;
 
 /// `PhraseQuery` matches a specific sequence of words.
@@ -116,6 +118,21 @@ impl Query for PhraseQuery {
     fn query_terms(&self, term_set: &mut BTreeSet<Term>) {
         for (_, query_term) in &self.phrase_terms {
             term_set.insert(query_term.clone());
+        }
+    }
+
+    fn terminfos(
+        &self,
+        terminfo_set: &mut BTreeSet<TermInfo>,
+        term_dict: &TermDictionary,
+        field: Field,
+    ) {
+        if self.field == field {
+            for (_, query_term) in &self.phrase_terms {
+                term_dict
+                    .get(query_term.text())
+                    .map(|terminfo| terminfo_set.insert(terminfo));
+            }
         }
     }
 }

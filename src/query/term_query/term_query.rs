@@ -1,8 +1,10 @@
 use super::term_weight::TermWeight;
+use crate::postings::TermInfo;
 use crate::query::bm25::BM25Weight;
 use crate::query::Query;
 use crate::query::Weight;
-use crate::schema::IndexRecordOption;
+use crate::schema::{Field, IndexRecordOption};
+use crate::termdict::TermDictionary;
 use crate::Searcher;
 use crate::Term;
 use std::collections::BTreeSet;
@@ -105,5 +107,18 @@ impl Query for TermQuery {
     }
     fn query_terms(&self, term_set: &mut BTreeSet<Term>) {
         term_set.insert(self.term.clone());
+    }
+
+    fn terminfos(
+        &self,
+        terminfo_set: &mut BTreeSet<TermInfo>,
+        term_dict: &TermDictionary,
+        field: Field,
+    ) {
+        if self.term.field() == field {
+            term_dict
+                .get(&self.term.text())
+                .map(|terminfo| terminfo_set.insert(terminfo));
+        }
     }
 }

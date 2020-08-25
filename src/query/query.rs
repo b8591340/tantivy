@@ -1,6 +1,9 @@
 use super::Weight;
 use crate::core::searcher::Searcher;
+use crate::postings::TermInfo;
 use crate::query::Explanation;
+use crate::schema::Field;
+use crate::termdict::TermDictionary;
 use crate::DocAddress;
 use crate::Term;
 use downcast_rs::impl_downcast;
@@ -69,6 +72,16 @@ pub trait Query: QueryClone + downcast_rs::Downcast + fmt::Debug {
     /// Extract all of the terms associated to the query and insert them in the
     /// term set given in arguments.
     fn query_terms(&self, _term_set: &mut BTreeSet<Term>) {}
+
+    /// Extract all of the terms associated to the query and insert them in the
+    /// term set given in arguments.
+    fn terminfos(
+        &self,
+        _terminfo_set: &mut BTreeSet<TermInfo>,
+        _term_dict: &TermDictionary,
+        _field: Field,
+    ) {
+    }
 }
 
 pub trait QueryClone {
@@ -95,6 +108,15 @@ impl Query for Box<dyn Query> {
 
     fn query_terms(&self, term_set: &mut BTreeSet<Term<Vec<u8>>>) {
         self.as_ref().query_terms(term_set);
+    }
+
+    fn terminfos(
+        &self,
+        terminfo_set: &mut BTreeSet<TermInfo>,
+        term_dict: &TermDictionary,
+        field: Field,
+    ) {
+        self.as_ref().terminfos(terminfo_set, term_dict, field)
     }
 }
 

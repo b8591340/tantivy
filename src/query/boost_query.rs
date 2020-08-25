@@ -1,6 +1,9 @@
 use crate::fastfield::DeleteBitSet;
+use crate::postings::TermInfo;
 use crate::query::explanation::does_not_match;
 use crate::query::{Explanation, Query, Scorer, Weight};
+use crate::schema::Field;
+use crate::termdict::TermDictionary;
 use crate::{DocId, DocSet, Score, Searcher, SegmentReader, Term};
 use std::collections::BTreeSet;
 use std::fmt;
@@ -50,6 +53,15 @@ impl Query for BoostQuery {
 
     fn query_terms(&self, term_set: &mut BTreeSet<Term>) {
         self.query.query_terms(term_set)
+    }
+
+    fn terminfos(
+        &self,
+        terminfo_set: &mut BTreeSet<TermInfo>,
+        term_dict: &TermDictionary,
+        field: Field,
+    ) {
+        self.query.terminfos(terminfo_set, term_dict, field)
     }
 }
 
