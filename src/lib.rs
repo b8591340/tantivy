@@ -154,6 +154,7 @@ mod reader;
 pub use self::reader::{IndexReader, IndexReaderBuilder, ReloadPolicy};
 mod highlighter;
 pub use self::highlighter::{HighlightRange, HighlightRangesGenerator};
+pub use self::highlighter::{TextRange, TextRangesGenerator};
 
 mod docset;
 pub use self::docset::{DocSet, TERMINATED};
