@@ -105,9 +105,6 @@ impl Query for TermQuery {
     fn weight(&self, searcher: &Searcher, scoring_enabled: bool) -> crate::Result<Box<dyn Weight>> {
         Ok(Box::new(self.specialized_weight(searcher, scoring_enabled)))
     }
-    fn query_terms(&self, term_set: &mut BTreeSet<Term>) {
-        term_set.insert(self.term.clone());
-    }
 
     fn terminfos(
         &self,

@@ -115,12 +115,6 @@ impl Query for PhraseQuery {
         Ok(Box::new(phrase_weight))
     }
 
-    fn query_terms(&self, term_set: &mut BTreeSet<Term>) {
-        for (_, query_term) in &self.phrase_terms {
-            term_set.insert(query_term.clone());
-        }
-    }
-
     fn terminfos(
         &self,
         terminfo_set: &mut BTreeSet<TermInfo>,

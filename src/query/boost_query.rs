@@ -51,10 +51,6 @@ impl Query for BoostQuery {
         Ok(boosted_weight)
     }
 
-    fn query_terms(&self, term_set: &mut BTreeSet<Term>) {
-        self.query.query_terms(term_set)
-    }
-
     fn terminfos(
         &self,
         terminfo_set: &mut BTreeSet<TermInfo>,

@@ -71,10 +71,6 @@ pub trait Query: QueryClone + downcast_rs::Downcast + fmt::Debug {
 
     /// Extract all of the terms associated to the query and insert them in the
     /// term set given in arguments.
-    fn query_terms(&self, _term_set: &mut BTreeSet<Term>) {}
-
-    /// Extract all of the terms associated to the query and insert them in the
-    /// term set given in arguments.
     fn terminfos(
         &self,
         _terminfo_set: &mut BTreeSet<TermInfo>,
@@ -104,10 +100,6 @@ impl Query for Box<dyn Query> {
 
     fn count(&self, searcher: &Searcher) -> crate::Result<usize> {
         self.as_ref().count(searcher)
-    }
-
-    fn query_terms(&self, term_set: &mut BTreeSet<Term<Vec<u8>>>) {
-        self.as_ref().query_terms(term_set);
     }
 
     fn terminfos(

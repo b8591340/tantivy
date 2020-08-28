@@ -161,12 +161,6 @@ impl Query for BooleanQuery {
         Ok(Box::new(BooleanWeight::new(sub_weights, scoring_enabled)))
     }
 
-    fn query_terms(&self, term_set: &mut BTreeSet<Term>) {
-        for (_occur, subquery) in &self.subqueries {
-            subquery.query_terms(term_set);
-        }
-    }
-
     fn terminfos(
         &self,
         terminfo_set: &mut BTreeSet<TermInfo>,
