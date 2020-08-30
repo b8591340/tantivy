@@ -2,6 +2,7 @@ use super::logical_ast::*;
 use crate::core::Index;
 use crate::query::BooleanQuery;
 use crate::query::EmptyQuery;
+use crate::query::FuzzyTermQuery;
 use crate::query::Occur;
 use crate::query::PhraseQuery;
 use crate::query::Query;
@@ -528,7 +529,41 @@ impl QueryParser {
 
 fn convert_literal_to_query(logical_literal: LogicalLiteral) -> Box<dyn Query> {
     match logical_literal {
-        LogicalLiteral::Term(term) => Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs)),
+        LogicalLiteral::Term(term) => Box::new(BooleanQuery::from(vec![
+            (
+                Occur::Should,
+                Box::new(TermQuery::new(term.clone(), IndexRecordOption::WithFreqs))
+                    as Box<dyn Query>,
+            ),
+            (
+                Occur::Should,
+                Box::new(BoostQuery::new(
+                    Box::new(FuzzyTermQuery::new_prefix(term.clone(), 0, true)) as Box<dyn Query>,
+                    0.9,
+                )) as Box<dyn Query>,
+            ),
+            (
+                Occur::Should,
+                Box::new(BoostQuery::new(
+                    Box::new(FuzzyTermQuery::new(term.clone(), 0, true)) as Box<dyn Query>,
+                    0.9,
+                )) as Box<dyn Query>,
+            ),
+            (
+                Occur::Should,
+                Box::new(BoostQuery::new(
+                    Box::new(FuzzyTermQuery::new_prefix(term.clone(), 1, true)) as Box<dyn Query>,
+                    0.6,
+                )) as Box<dyn Query>,
+            ),
+            (
+                Occur::Should,
+                Box::new(BoostQuery::new(
+                    Box::new(FuzzyTermQuery::new(term, 1, true)) as Box<dyn Query>,
+                    0.6,
+                )) as Box<dyn Query>,
+            ),
+        ])),
         LogicalLiteral::Phrase(term_with_offsets) => {
             Box::new(PhraseQuery::new_with_offset(term_with_offsets))
         }
