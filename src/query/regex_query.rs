@@ -6,6 +6,7 @@ use crate::termdict::TermDictionary;
 use crate::Searcher;
 use std::clone::Clone;
 use std::collections::BTreeSet;
+use std::io;
 use std::sync::Arc;
 use tantivy_fst::Regex;
 
@@ -93,14 +94,15 @@ impl Query for RegexQuery {
         terminfo_set: &mut BTreeSet<TermInfo>,
         term_dict: &TermDictionary,
         field: Field,
-    ) {
+    ) -> io::Result<()> {
         if self.field == field {
             let automaton = self.specialized_weight();
-            let mut term_stream = automaton.automaton_stream(term_dict);
+            let mut term_stream = automaton.automaton_stream(term_dict)?;
             while term_stream.advance() {
                 terminfo_set.insert(term_stream.value().clone());
             }
         }
+        Ok(())
     }
 }
 
@@ -121,7 +123,7 @@ mod test {
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
         {
-            let mut index_writer = index.writer_with_num_threads(1, 10_000_000).unwrap();
+            let mut index_writer = index.writer_for_tests().unwrap();
             index_writer.add_document(doc!(
                 country_field => "japan",
             ));

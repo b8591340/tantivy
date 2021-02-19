@@ -7,7 +7,6 @@ use crate::DocId;
 use crate::Score;
 use crate::SegmentLocalId;
 use crate::SegmentReader;
-use crate::TantivyError;
 use std::cmp::Ordering;
 use std::collections::btree_map;
 use std::collections::BTreeMap;
@@ -266,10 +265,7 @@ impl Collector for FacetCollector {
         _: SegmentLocalId,
         reader: &SegmentReader,
     ) -> crate::Result<FacetSegmentCollector> {
-        let field_name = reader.schema().get_field_name(self.field);
-        let facet_reader = reader.facet_reader(self.field).ok_or_else(|| {
-            TantivyError::SchemaError(format!("Field {:?} is not a facet field.", field_name))
-        })?;
+        let facet_reader = reader.facet_reader(self.field)?;
 
         let mut collapse_mapping = Vec::new();
         let mut counts = Vec::new();
@@ -278,7 +274,7 @@ impl Collector for FacetCollector {
         let mut collapse_facet_it = self.facets.iter().peekable();
         collapse_facet_ords.push(0);
         {
-            let mut facet_streamer = facet_reader.facet_dict().range().into_stream();
+            let mut facet_streamer = facet_reader.facet_dict().range().into_stream()?;
             if facet_streamer.advance() {
                 'outer: loop {
                     // at the begining of this loop, facet_streamer
@@ -372,9 +368,12 @@ impl SegmentCollector for FacetSegmentCollector {
             }
             let mut facet = vec![];
             let facet_ord = self.collapse_facet_ords[collapsed_facet_ord];
-            facet_dict.ord_to_term(facet_ord as u64, &mut facet);
-            // TODO
-            facet_counts.insert(Facet::from_encoded(facet).unwrap(), count);
+            // TODO handle errors.
+            if facet_dict.ord_to_term(facet_ord as u64, &mut facet).is_ok() {
+                if let Ok(facet) = Facet::from_encoded(facet) {
+                    facet_counts.insert(facet, count);
+                }
+            }
         }
         FacetCounts { facet_counts }
     }
@@ -399,6 +398,8 @@ impl<'a> Iterator for FacetChildIterator<'a> {
 }
 
 impl FacetCounts {
+    /// Returns an iterator over all of the facet count pairs inside this result.
+    /// See the documentation for `FacetCollector` for a usage example.
     pub fn get<T>(&self, facet_from: T) -> FacetChildIterator<'_>
     where
         Facet: From<T>,
@@ -418,6 +419,8 @@ impl FacetCounts {
         FacetChildIterator { underlying }
     }
 
+    /// Returns a vector of top `k` facets with their counts, sorted highest-to-lowest by counts.
+    /// See the documentation for `FacetCollector` for a usage example.
     pub fn top_k<T>(&self, facet: T, k: usize) -> Vec<(&Facet, u64)>
     where
         Facet: From<T>,
@@ -472,7 +475,7 @@ mod tests {
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
 
-        let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+        let mut index_writer = index.writer_for_tests().unwrap();
         let num_facets: usize = 3 * 4 * 5;
         let facets: Vec<Facet> = (0..num_facets)
             .map(|mut n| {
@@ -531,7 +534,7 @@ mod tests {
         let facet_field = schema_builder.add_facet_field("facets");
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
-        let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+        let mut index_writer = index.writer_for_tests().unwrap();
         index_writer.add_document(doc!(
             facet_field => Facet::from_text(&"/subjects/A/a"),
             facet_field => Facet::from_text(&"/subjects/B/a"),
@@ -550,12 +553,12 @@ mod tests {
     }
 
     #[test]
-    fn test_doc_search_by_facet() {
+    fn test_doc_search_by_facet() -> crate::Result<()> {
         let mut schema_builder = Schema::builder();
         let facet_field = schema_builder.add_facet_field("facet");
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
-        let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+        let mut index_writer = index.writer_for_tests()?;
         index_writer.add_document(doc!(
             facet_field => Facet::from_text(&"/A/A"),
         ));
@@ -568,8 +571,8 @@ mod tests {
         index_writer.add_document(doc!(
             facet_field => Facet::from_text(&"/D/C/A"),
         ));
-        index_writer.commit().unwrap();
-        let reader = index.reader().unwrap();
+        index_writer.commit()?;
+        let reader = index.reader()?;
         let searcher = reader.searcher();
         assert_eq!(searcher.num_docs(), 4);
 
@@ -586,17 +589,17 @@ mod tests {
         assert_eq!(count_facet("/A/C"), 1);
         assert_eq!(count_facet("/A/C/A"), 1);
         assert_eq!(count_facet("/C/A"), 0);
+
+        let query_parser = QueryParser::for_index(&index, vec![]);
         {
-            let query_parser = QueryParser::for_index(&index, vec![]);
-            {
-                let query = query_parser.parse_query("facet:/A/B").unwrap();
-                assert_eq!(1, searcher.search(&query, &Count).unwrap());
-            }
-            {
-                let query = query_parser.parse_query("facet:/A").unwrap();
-                assert_eq!(3, searcher.search(&query, &Count).unwrap());
-            }
+            let query = query_parser.parse_query("facet:/A/B")?;
+            assert_eq!(1, searcher.search(&query, &Count).unwrap());
         }
+        {
+            let query = query_parser.parse_query("facet:/A")?;
+            assert_eq!(3, searcher.search(&query, &Count)?);
+        }
+        Ok(())
     }
 
     #[test]
@@ -631,7 +634,7 @@ mod tests {
             .collect();
         docs[..].shuffle(&mut thread_rng());
 
-        let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+        let mut index_writer = index.writer_for_tests().unwrap();
         for doc in docs {
             index_writer.add_document(doc);
         }
@@ -684,7 +687,7 @@ mod bench {
         // 40425 docs
         docs[..].shuffle(&mut thread_rng());
 
-        let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+        let mut index_writer = index.writer_for_tests().unwrap();
         for doc in docs {
             index_writer.add_document(doc);
         }

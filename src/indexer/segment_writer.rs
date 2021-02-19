@@ -16,8 +16,6 @@ use crate::tokenizer::{FacetTokenizer, TextAnalyzer};
 use crate::tokenizer::{TokenStreamChain, Tokenizer};
 use crate::Opstamp;
 use crate::{DocId, SegmentComponent};
-use std::io;
-use std::str;
 
 /// Computes the initial size of the hash table.
 ///
@@ -48,6 +46,7 @@ pub struct SegmentWriter {
     fieldnorms_writer: FieldNormsWriter,
     doc_opstamps: Vec<Opstamp>,
     tokenizers: Vec<Option<TextAnalyzer>>,
+    term_buffer: Term,
 }
 
 impl SegmentWriter {
@@ -91,6 +90,7 @@ impl SegmentWriter {
             fast_field_writers: FastFieldsWriter::from_schema(schema),
             doc_opstamps: Vec::with_capacity(1_000),
             tokenizers,
+            term_buffer: Term::new(),
         })
     }
 
@@ -116,7 +116,11 @@ impl SegmentWriter {
     /// Indexes a new document
     ///
     /// As a user, you should rather use `IndexWriter`'s add_document.
-    pub fn add_document(&mut self, add_operation: AddOperation, schema: &Schema) -> io::Result<()> {
+    pub fn add_document(
+        &mut self,
+        add_operation: AddOperation,
+        schema: &Schema,
+    ) -> crate::Result<()> {
         let doc_id = self.max_doc;
         let mut doc = add_operation.document;
         self.doc_opstamps.push(add_operation.opstamp);
@@ -124,34 +128,45 @@ impl SegmentWriter {
         self.fast_field_writers.add_document(&doc);
 
         for (field, field_values) in doc.get_sorted_field_values() {
-            let field_options = schema.get_field_entry(field);
-            if !field_options.is_indexed() {
+            let field_entry = schema.get_field_entry(field);
+            let make_schema_error = || {
+                crate::TantivyError::SchemaError(format!(
+                    "Expected a {:?} for field {:?}",
+                    field_entry.field_type().value_type(),
+                    field_entry.name()
+                ))
+            };
+            if !field_entry.is_indexed() {
                 continue;
             }
-            match *field_options.field_type() {
+            let (term_buffer, multifield_postings) =
+                (&mut self.term_buffer, &mut self.multifield_postings);
+            match *field_entry.field_type() {
                 FieldType::HierarchicalFacet => {
-                    let facets: Vec<&str> = field_values
-                        .iter()
-                        .flat_map(|field_value| match *field_value.value() {
-                            Value::Facet(ref facet) => Some(facet.encoded_str()),
-                            _ => {
-                                panic!("Expected hierarchical facet");
-                            }
-                        })
-                        .collect();
-                    let mut term = Term::for_field(field); // we set the Term
-                    for fake_str in facets {
+                    term_buffer.set_field(field);
+                    let facets =
+                        field_values
+                            .iter()
+                            .flat_map(|field_value| match *field_value.value() {
+                                Value::Facet(ref facet) => Some(facet.encoded_str()),
+                                _ => {
+                                    panic!("Expected hierarchical facet");
+                                }
+                            });
+                    for facet_str in facets {
                         let mut unordered_term_id_opt = None;
-                        FacetTokenizer.token_stream(fake_str).process(&mut |token| {
-                            term.set_text(&token.text);
-                            let unordered_term_id =
-                                self.multifield_postings.subscribe(doc_id, &term);
-                            unordered_term_id_opt = Some(unordered_term_id);
-                        });
+                        FacetTokenizer
+                            .token_stream(facet_str)
+                            .process(&mut |token| {
+                                term_buffer.set_text(&token.text);
+                                let unordered_term_id =
+                                    multifield_postings.subscribe(doc_id, &term_buffer);
+                                unordered_term_id_opt = Some(unordered_term_id);
+                            });
                         if let Some(unordered_term_id) = unordered_term_id_opt {
                             self.fast_field_writers
                                 .get_multivalue_writer(field)
-                                .expect("multified writer for facet missing")
+                                .expect("writer for facet missing")
                                 .add_val(unordered_term_id);
                         }
                     }
@@ -168,7 +183,6 @@ impl SegmentWriter {
                                 if let Some(last_token) = tok_str.tokens.last() {
                                     total_offset += last_token.offset_to;
                                 }
-
                                 token_streams
                                     .push(PreTokenizedStream::from(tok_str.clone()).into());
                             }
@@ -178,7 +192,6 @@ impl SegmentWriter {
                                 {
                                     offsets.push(total_offset);
                                     total_offset += text.len();
-
                                     token_streams.push(tokenizer.token_stream(text));
                                 }
                             }
@@ -190,8 +203,12 @@ impl SegmentWriter {
                         0
                     } else {
                         let mut token_stream = TokenStreamChain::new(offsets, token_streams);
-                        self.multifield_postings
-                            .index_text(doc_id, field, &mut token_stream)
+                        multifield_postings.index_text(
+                            doc_id,
+                            field,
+                            &mut token_stream,
+                            term_buffer,
+                        )
                     };
 
                     self.fieldnorms_writer.record(doc_id, field, num_tokens);
@@ -199,49 +216,67 @@ impl SegmentWriter {
                 FieldType::U64(ref int_option) => {
                     if int_option.is_indexed() {
                         for field_value in field_values {
-                            let term = Term::from_field_u64(
-                                field_value.field(),
-                                field_value.value().u64_value(),
-                            );
-                            self.multifield_postings.subscribe(doc_id, &term);
+                            term_buffer.set_field(field_value.field());
+                            let u64_val = field_value
+                                .value()
+                                .u64_value()
+                                .ok_or_else(make_schema_error)?;
+                            term_buffer.set_u64(u64_val);
+                            multifield_postings.subscribe(doc_id, &term_buffer);
                         }
                     }
                 }
                 FieldType::Date(ref int_option) => {
                     if int_option.is_indexed() {
                         for field_value in field_values {
-                            let term = Term::from_field_i64(
-                                field_value.field(),
-                                field_value.value().date_value().timestamp(),
-                            );
-                            self.multifield_postings.subscribe(doc_id, &term);
+                            term_buffer.set_field(field_value.field());
+                            let date_val = field_value
+                                .value()
+                                .date_value()
+                                .ok_or_else(make_schema_error)?;
+                            term_buffer.set_i64(date_val.timestamp());
+                            multifield_postings.subscribe(doc_id, &term_buffer);
                         }
                     }
                 }
                 FieldType::I64(ref int_option) => {
                     if int_option.is_indexed() {
                         for field_value in field_values {
-                            let term = Term::from_field_i64(
-                                field_value.field(),
-                                field_value.value().i64_value(),
-                            );
-                            self.multifield_postings.subscribe(doc_id, &term);
+                            term_buffer.set_field(field_value.field());
+                            let i64_val = field_value
+                                .value()
+                                .i64_value()
+                                .ok_or_else(make_schema_error)?;
+                            term_buffer.set_i64(i64_val);
+                            multifield_postings.subscribe(doc_id, &term_buffer);
                         }
                     }
                 }
                 FieldType::F64(ref int_option) => {
                     if int_option.is_indexed() {
                         for field_value in field_values {
-                            let term = Term::from_field_f64(
-                                field_value.field(),
-                                field_value.value().f64_value(),
-                            );
-                            self.multifield_postings.subscribe(doc_id, &term);
+                            term_buffer.set_field(field_value.field());
+                            let f64_val = field_value
+                                .value()
+                                .f64_value()
+                                .ok_or_else(make_schema_error)?;
+                            term_buffer.set_f64(f64_val);
+                            multifield_postings.subscribe(doc_id, &term_buffer);
                         }
                     }
                 }
-                FieldType::Bytes => {
-                    // Do nothing. Bytes only supports fast fields.
+                FieldType::Bytes(ref option) => {
+                    if option.is_indexed() {
+                        for field_value in field_values {
+                            term_buffer.set_field(field_value.field());
+                            let bytes = field_value
+                                .value()
+                                .bytes_value()
+                                .ok_or_else(make_schema_error)?;
+                            term_buffer.set_bytes(bytes);
+                            self.multifield_postings.subscribe(doc_id, &term_buffer);
+                        }
+                    }
                 }
             }
         }

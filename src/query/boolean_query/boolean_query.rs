@@ -9,6 +9,7 @@ use crate::schema::{Field, IndexRecordOption};
 use crate::termdict::TermDictionary;
 use crate::Searcher;
 use std::collections::BTreeSet;
+use std::io;
 
 /// The boolean query returns a set of documents
 /// that matches the Boolean combination of constituent subqueries.
@@ -85,7 +86,7 @@ use std::collections::BTreeSet;
 ///    ];
 ///    // Make a BooleanQuery equivalent to
 ///    // title:+diary title:-girl
-///    let diary_must_and_girl_mustnot = BooleanQuery::from(queries_with_occurs1);
+///    let diary_must_and_girl_mustnot = BooleanQuery::new(queries_with_occurs1);
 ///    let count1 = searcher.search(&diary_must_and_girl_mustnot, &Count)?;
 ///    assert_eq!(count1, 1);
 ///
@@ -95,7 +96,7 @@ use std::collections::BTreeSet;
 ///        IndexRecordOption::Basic,
 ///    ));
 ///    // "title:diary OR title:cow"
-///    let title_diary_or_cow = BooleanQuery::from(vec![
+///    let title_diary_or_cow = BooleanQuery::new(vec![
 ///        (Occur::Should, diary_term_query.box_clone()),
 ///        (Occur::Should, cow_term_query),
 ///    ]);
@@ -110,7 +111,7 @@ use std::collections::BTreeSet;
 ///    // You can combine subqueries of different types into 1 BooleanQuery:
 ///    // `TermQuery` and `PhraseQuery`
 ///    // "title:diary OR "dairy cow"
-///    let term_of_phrase_query = BooleanQuery::from(vec![
+///    let term_of_phrase_query = BooleanQuery::new(vec![
 ///        (Occur::Should, diary_term_query.box_clone()),
 ///        (Occur::Should, phrase_query.box_clone()),
 ///    ]);
@@ -119,7 +120,7 @@ use std::collections::BTreeSet;
 ///
 ///    // You can nest one BooleanQuery inside another
 ///    // body:found AND ("title:diary OR "dairy cow")
-///    let nested_query = BooleanQuery::from(vec![
+///    let nested_query = BooleanQuery::new(vec![
 ///        (Occur::Must, body_term_query),
 ///        (Occur::Must, Box::new(term_of_phrase_query))
 ///    ]);
@@ -145,7 +146,7 @@ impl Clone for BooleanQuery {
 
 impl From<Vec<(Occur, Box<dyn Query>)>> for BooleanQuery {
     fn from(subqueries: Vec<(Occur, Box<dyn Query>)>) -> BooleanQuery {
-        BooleanQuery { subqueries }
+        BooleanQuery::new(subqueries)
     }
 }
 
@@ -166,14 +167,32 @@ impl Query for BooleanQuery {
         terminfo_set: &mut BTreeSet<TermInfo>,
         term_dict: &TermDictionary,
         field: Field,
-    ) {
+    ) -> io::Result<()> {
         for (_occur, subquery) in &self.subqueries {
-            subquery.terminfos(terminfo_set, term_dict, field)
+            subquery.terminfos(terminfo_set, term_dict, field)?
         }
+        Ok(())
     }
 }
 
 impl BooleanQuery {
+    /// Creates a new boolean query.
+    pub fn new(subqueries: Vec<(Occur, Box<dyn Query>)>) -> BooleanQuery {
+        BooleanQuery { subqueries }
+    }
+
+    /// Returns the intersection of the queries.
+    pub fn intersection(queries: Vec<Box<dyn Query>>) -> BooleanQuery {
+        let subqueries = queries.into_iter().map(|s| (Occur::Must, s)).collect();
+        BooleanQuery::new(subqueries)
+    }
+
+    /// Returns the union of the queries.
+    pub fn union(queries: Vec<Box<dyn Query>>) -> BooleanQuery {
+        let subqueries = queries.into_iter().map(|s| (Occur::Should, s)).collect();
+        BooleanQuery::new(subqueries)
+    }
+
     /// Helper method to create a boolean query matching a given list of terms.
     /// The resulting query is a disjunction of the terms.
     pub fn new_multiterms_query(terms: Vec<Term>) -> BooleanQuery {
@@ -185,11 +204,85 @@ impl BooleanQuery {
                 (Occur::Should, term_query)
             })
             .collect();
-        BooleanQuery::from(occur_term_queries)
+        BooleanQuery::new(occur_term_queries)
     }
 
     /// Deconstructed view of the clauses making up this query.
     pub fn clauses(&self) -> &[(Occur, Box<dyn Query>)] {
         &self.subqueries[..]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BooleanQuery;
+    use crate::collector::DocSetCollector;
+    use crate::query::{QueryClone, TermQuery};
+    use crate::schema::{IndexRecordOption, Schema, TEXT};
+    use crate::{DocAddress, Index, Term};
+
+    fn create_test_index() -> crate::Result<Index> {
+        let mut schema_builder = Schema::builder();
+        let text = schema_builder.add_text_field("text", TEXT);
+        let schema = schema_builder.build();
+        let index = Index::create_in_ram(schema);
+        let mut writer = index.writer_for_tests().unwrap();
+        writer.add_document(doc!(text=>"b c"));
+        writer.add_document(doc!(text=>"a c"));
+        writer.add_document(doc!(text=>"a b"));
+        writer.add_document(doc!(text=>"a d"));
+        writer.commit()?;
+        Ok(index)
+    }
+
+    #[test]
+    fn test_union() -> crate::Result<()> {
+        let index = create_test_index()?;
+        let searcher = index.reader()?.searcher();
+        let text = index.schema().get_field("text").unwrap();
+        let term_a = TermQuery::new(Term::from_field_text(text, "a"), IndexRecordOption::Basic);
+        let term_d = TermQuery::new(Term::from_field_text(text, "d"), IndexRecordOption::Basic);
+        let union_ad = BooleanQuery::union(vec![term_a.box_clone(), term_d.box_clone()]);
+        let docs = searcher.search(&union_ad, &DocSetCollector)?;
+        assert_eq!(
+            docs,
+            vec![
+                DocAddress(0u32, 1u32),
+                DocAddress(0u32, 2u32),
+                DocAddress(0u32, 3u32)
+            ]
+            .into_iter()
+            .collect()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_intersection() -> crate::Result<()> {
+        let index = create_test_index()?;
+        let searcher = index.reader()?.searcher();
+        let text = index.schema().get_field("text").unwrap();
+        let term_a = TermQuery::new(Term::from_field_text(text, "a"), IndexRecordOption::Basic);
+        let term_b = TermQuery::new(Term::from_field_text(text, "b"), IndexRecordOption::Basic);
+        let term_c = TermQuery::new(Term::from_field_text(text, "c"), IndexRecordOption::Basic);
+        let intersection_ab =
+            BooleanQuery::intersection(vec![term_a.box_clone(), term_b.box_clone()]);
+        let intersection_ac =
+            BooleanQuery::intersection(vec![term_a.box_clone(), term_c.box_clone()]);
+        let intersection_bc =
+            BooleanQuery::intersection(vec![term_b.box_clone(), term_c.box_clone()]);
+        {
+            let docs = searcher.search(&intersection_ab, &DocSetCollector)?;
+            assert_eq!(docs, vec![DocAddress(0u32, 2u32)].into_iter().collect());
+        }
+        {
+            let docs = searcher.search(&intersection_ac, &DocSetCollector)?;
+            assert_eq!(docs, vec![DocAddress(0u32, 1u32)].into_iter().collect());
+        }
+        {
+            let docs = searcher.search(&intersection_bc, &DocSetCollector)?;
+            assert_eq!(docs, vec![DocAddress(0u32, 0u32)].into_iter().collect());
+        }
+        Ok(())
     }
 }

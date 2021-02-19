@@ -1,9 +1,9 @@
 use crate::directory::directory_lock::Lock;
 use crate::directory::error::LockError;
 use crate::directory::error::{DeleteError, OpenReadError, OpenWriteError};
-use crate::directory::WatchCallback;
 use crate::directory::WatchHandle;
-use crate::directory::{ReadOnlySource, WritePtr};
+use crate::directory::{FileHandle, WatchCallback};
+use crate::directory::{FileSlice, WritePtr};
 use std::fmt;
 use std::io;
 use std::io::Write;
@@ -11,7 +11,6 @@ use std::marker::Send;
 use std::marker::Sync;
 use std::path::Path;
 use std::path::PathBuf;
-use std::result;
 use std::thread;
 use std::time::Duration;
 
@@ -80,7 +79,7 @@ fn try_acquire_lock(
 ) -> Result<DirectoryLock, TryAcquireLockError> {
     let mut write = directory.open_write(filepath).map_err(|e| match e {
         OpenWriteError::FileAlreadyExists(_) => TryAcquireLockError::FileExists,
-        OpenWriteError::IOError(io_error) => TryAcquireLockError::IOError(io_error.into()),
+        OpenWriteError::IOError { io_error, .. } => TryAcquireLockError::IOError(io_error),
     })?;
     write.flush().map_err(TryAcquireLockError::IOError)?;
     Ok(DirectoryLock::from(Box::new(DirectoryLockGuard {
@@ -109,37 +108,43 @@ fn retry_policy(is_blocking: bool) -> RetryPolicy {
 /// should be your default choice.
 /// - The [`RAMDirectory`](struct.RAMDirectory.html), which
 /// should be used mostly for tests.
-///
 pub trait Directory: DirectoryClone + fmt::Debug + Send + Sync + 'static {
-    /// Opens a virtual file for read.
+    /// Opens a file and returns a boxed `FileHandle`.
     ///
+    /// Users of `Directory` should typically call `Directory::open_read(...)`,
+    /// while `Directory` implementor should implement `get_file_handle()`.
+    fn get_file_handle(&self, path: &Path) -> Result<Box<dyn FileHandle>, OpenReadError>;
+
     /// Once a virtual file is open, its data may not
     /// change.
     ///
     /// Specifically, subsequent writes or flushes should
-    /// have no effect on the returned `ReadOnlySource` object.
+    /// have no effect on the returned `FileSlice` object.
     ///
     /// You should only use this to read files create with [Directory::open_write].
-    fn open_read(&self, path: &Path) -> result::Result<ReadOnlySource, OpenReadError>;
+    fn open_read(&self, path: &Path) -> Result<FileSlice, OpenReadError> {
+        let file_handle = self.get_file_handle(path)?;
+        Ok(FileSlice::new(file_handle))
+    }
 
     /// Removes a file
     ///
     /// Removing a file will not affect an eventual
-    /// existing ReadOnlySource pointing to it.
+    /// existing FileSlice pointing to it.
     ///
     /// Removing a nonexistent file, yields a
     /// `DeleteError::DoesNotExist`.
-    fn delete(&self, path: &Path) -> result::Result<(), DeleteError>;
+    fn delete(&self, path: &Path) -> Result<(), DeleteError>;
 
     /// Returns true iff the file exists
-    fn exists(&self, path: &Path) -> bool;
+    fn exists(&self, path: &Path) -> Result<bool, OpenReadError>;
 
     /// Opens a writer for the *virtual file* associated with
     /// a Path.
     ///
     /// Right after this call, the file should be created
     /// and any subsequent call to `open_read` for the
-    /// same path should return a `ReadOnlySource`.
+    /// same path should return a `FileSlice`.
     ///
     /// Write operations may be aggressively buffered.
     /// The client of this trait is responsible for calling flush
@@ -153,7 +158,7 @@ pub trait Directory: DirectoryClone + fmt::Debug + Send + Sync + 'static {
     /// was not called.
     ///
     /// The file may not previously exist.
-    fn open_write(&mut self, path: &Path) -> Result<WritePtr, OpenWriteError>;
+    fn open_write(&self, path: &Path) -> Result<WritePtr, OpenWriteError>;
 
     /// Reads the full content file that has been written using
     /// atomic_write.
@@ -169,7 +174,7 @@ pub trait Directory: DirectoryClone + fmt::Debug + Send + Sync + 'static {
     /// a partially written file.
     ///
     /// The file may or may not previously exist.
-    fn atomic_write(&mut self, path: &Path, data: &[u8]) -> io::Result<()>;
+    fn atomic_write(&self, path: &Path, data: &[u8]) -> io::Result<()>;
 
     /// Acquire a lock in the given directory.
     ///

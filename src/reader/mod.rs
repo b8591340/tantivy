@@ -3,14 +3,14 @@ mod pool;
 pub use self::pool::LeasedItem;
 use self::pool::Pool;
 use crate::core::Segment;
-use crate::directory::Directory;
 use crate::directory::WatchHandle;
 use crate::directory::META_LOCK;
+use crate::directory::{Directory, WatchCallback};
 use crate::Index;
 use crate::Searcher;
 use crate::SegmentReader;
-use std::convert::TryInto;
 use std::sync::Arc;
+use std::{convert::TryInto, io};
 
 /// Defines when a new version of the index should be reloaded.
 ///
@@ -88,7 +88,7 @@ impl IndexReaderBuilder {
                 let watch_handle = inner_reader_arc
                     .index
                     .directory()
-                    .watch(Box::new(callback))?;
+                    .watch(WatchCallback::new(callback))?;
                 watch_handle_opt = Some(watch_handle);
             }
         }
@@ -138,11 +138,11 @@ impl InnerIndexReader {
                 .collect::<crate::Result<_>>()?
         };
         let schema = self.index.schema();
-        let searchers = std::iter::repeat_with(|| {
+        let searchers: Vec<Searcher> = std::iter::repeat_with(|| {
             Searcher::new(schema.clone(), self.index.clone(), segment_readers.clone())
         })
         .take(self.num_searchers)
-        .collect();
+        .collect::<io::Result<_>>()?;
         self.searcher_pool.publish_new_generation(searchers);
         Ok(())
     }

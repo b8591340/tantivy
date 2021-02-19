@@ -1,4 +1,4 @@
-use super::multivalued::MultiValueIntFastFieldWriter;
+use super::multivalued::MultiValuedFastFieldWriter;
 use crate::common;
 use crate::common::BinarySerializable;
 use crate::common::VInt;
@@ -13,7 +13,7 @@ use std::io;
 /// The fastfieldswriter regroup all of the fast field writers.
 pub struct FastFieldsWriter {
     single_value_writers: Vec<IntFastFieldWriter>,
-    multi_values_writers: Vec<MultiValueIntFastFieldWriter>,
+    multi_values_writers: Vec<MultiValuedFastFieldWriter>,
     bytes_value_writers: Vec<BytesFastFieldWriter>,
 }
 
@@ -33,7 +33,7 @@ impl FastFieldsWriter {
         let mut bytes_value_writers = Vec::new();
 
         for (field, field_entry) in schema.fields() {
-            match *field_entry.field_type() {
+            match field_entry.field_type() {
                 FieldType::I64(ref int_options)
                 | FieldType::U64(ref int_options)
                 | FieldType::F64(ref int_options)
@@ -46,19 +46,21 @@ impl FastFieldsWriter {
                             single_value_writers.push(fast_field_writer);
                         }
                         Some(Cardinality::MultiValues) => {
-                            let fast_field_writer = MultiValueIntFastFieldWriter::new(field, false);
+                            let fast_field_writer = MultiValuedFastFieldWriter::new(field, false);
                             multi_values_writers.push(fast_field_writer);
                         }
                         None => {}
                     }
                 }
                 FieldType::HierarchicalFacet => {
-                    let fast_field_writer = MultiValueIntFastFieldWriter::new(field, true);
+                    let fast_field_writer = MultiValuedFastFieldWriter::new(field, true);
                     multi_values_writers.push(fast_field_writer);
                 }
-                FieldType::Bytes => {
-                    let fast_field_writer = BytesFastFieldWriter::new(field);
-                    bytes_value_writers.push(fast_field_writer);
+                FieldType::Bytes(bytes_option) => {
+                    if bytes_option.is_fast() {
+                        let fast_field_writer = BytesFastFieldWriter::new(field);
+                        bytes_value_writers.push(fast_field_writer);
+                    }
                 }
                 _ => {}
             }
@@ -85,7 +87,7 @@ impl FastFieldsWriter {
     pub fn get_multivalue_writer(
         &mut self,
         field: Field,
-    ) -> Option<&mut MultiValueIntFastFieldWriter> {
+    ) -> Option<&mut MultiValuedFastFieldWriter> {
         // TODO optimize
         self.multi_values_writers
             .iter_mut()
@@ -126,6 +128,7 @@ impl FastFieldsWriter {
         for field_writer in &self.single_value_writers {
             field_writer.serialize(serializer)?;
         }
+
         for field_writer in &self.multi_values_writers {
             let field = field_writer.field();
             field_writer.serialize(serializer, mapping.get(&field))?;

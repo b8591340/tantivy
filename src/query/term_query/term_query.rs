@@ -1,14 +1,14 @@
 use super::term_weight::TermWeight;
 use crate::postings::TermInfo;
 use crate::query::bm25::BM25Weight;
-use crate::query::Query;
 use crate::query::Weight;
+use crate::query::{Explanation, Query};
 use crate::schema::{Field, IndexRecordOption};
 use crate::termdict::TermDictionary;
 use crate::Searcher;
 use crate::Term;
 use std::collections::BTreeSet;
-use std::fmt;
+use std::{fmt, io};
 
 /// A Term query matches all of the documents
 /// containing a specific term.
@@ -89,21 +89,45 @@ impl TermQuery {
     /// While `.weight(...)` returns a boxed trait object,
     /// this method return a specific implementation.
     /// This is useful for optimization purpose.
-    pub fn specialized_weight(&self, searcher: &Searcher, scoring_enabled: bool) -> TermWeight {
+    pub fn specialized_weight(
+        &self,
+        searcher: &Searcher,
+        scoring_enabled: bool,
+    ) -> crate::Result<TermWeight> {
         let term = self.term.clone();
-        let bm25_weight = BM25Weight::for_terms(searcher, &[term]);
+        let field_entry = searcher.schema().get_field_entry(term.field());
+        if !field_entry.is_indexed() {
+            return Err(crate::TantivyError::SchemaError(format!(
+                "Field {:?} is not indexed",
+                field_entry.name()
+            )));
+        }
+        let bm25_weight;
+        if scoring_enabled {
+            bm25_weight = BM25Weight::for_terms(searcher, &[term])?;
+        } else {
+            bm25_weight =
+                BM25Weight::new(Explanation::new("<no score>".to_string(), 1.0f32), 1.0f32);
+        }
         let index_record_option = if scoring_enabled {
             self.index_record_option
         } else {
             IndexRecordOption::Basic
         };
-        TermWeight::new(self.term.clone(), index_record_option, bm25_weight)
+        Ok(TermWeight::new(
+            self.term.clone(),
+            index_record_option,
+            bm25_weight,
+            scoring_enabled,
+        ))
     }
 }
 
 impl Query for TermQuery {
     fn weight(&self, searcher: &Searcher, scoring_enabled: bool) -> crate::Result<Box<dyn Weight>> {
-        Ok(Box::new(self.specialized_weight(searcher, scoring_enabled)))
+        Ok(Box::new(
+            self.specialized_weight(searcher, scoring_enabled)?,
+        ))
     }
 
     fn terminfos(
@@ -111,11 +135,12 @@ impl Query for TermQuery {
         terminfo_set: &mut BTreeSet<TermInfo>,
         term_dict: &TermDictionary,
         field: Field,
-    ) {
+    ) -> io::Result<()> {
         if self.term.field() == field {
             term_dict
-                .get(&self.term.text())
+                .get(&self.term.text())?
                 .map(|terminfo| terminfo_set.insert(terminfo));
         }
+        Ok(())
     }
 }

@@ -1,4 +1,5 @@
-use super::MultiValueIntFastFieldReader;
+use super::MultiValuedFastFieldReader;
+use crate::error::DataCorruption;
 use crate::schema::Facet;
 use crate::termdict::TermDictionary;
 use crate::termdict::TermOrdinal;
@@ -19,7 +20,7 @@ use std::str;
 /// list of facets. This ordinal is segment local and
 /// only makes sense for a given segment.
 pub struct FacetReader {
-    term_ords: MultiValueIntFastFieldReader<u64>,
+    term_ords: MultiValuedFastFieldReader<u64>,
     term_dict: TermDictionary,
     buffer: Vec<u8>,
 }
@@ -28,12 +29,12 @@ impl FacetReader {
     /// Creates a new `FacetReader`.
     ///
     /// A facet reader just wraps :
-    /// - a `MultiValueIntFastFieldReader` that makes it possible to
+    /// - a `MultiValuedFastFieldReader` that makes it possible to
     /// access the list of facet ords for a given document.
     /// - a `TermDictionary` that helps associating a facet to
     /// an ordinal and vice versa.
     pub fn new(
-        term_ords: MultiValueIntFastFieldReader<u64>,
+        term_ords: MultiValuedFastFieldReader<u64>,
         term_dict: TermDictionary,
     ) -> FacetReader {
         FacetReader {
@@ -62,18 +63,73 @@ impl FacetReader {
         &mut self,
         facet_ord: TermOrdinal,
         output: &mut Facet,
-    ) -> Result<(), str::Utf8Error> {
+    ) -> crate::Result<()> {
         let found_term = self
             .term_dict
-            .ord_to_term(facet_ord as u64, &mut self.buffer);
+            .ord_to_term(facet_ord as u64, &mut self.buffer)?;
         assert!(found_term, "Term ordinal {} no found.", facet_ord);
-        let facet_str = str::from_utf8(&self.buffer[..])?;
+        let facet_str = str::from_utf8(&self.buffer[..])
+            .map_err(|utf8_err| DataCorruption::comment_only(utf8_err.to_string()))?;
         output.set_facet_str(facet_str);
         Ok(())
     }
 
     /// Return the list of facet ordinals associated to a document.
-    pub fn facet_ords(&mut self, doc: DocId, output: &mut Vec<u64>) {
+    pub fn facet_ords(&self, doc: DocId, output: &mut Vec<u64>) {
         self.term_ords.get_vals(doc, output);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Index;
+    use crate::{
+        schema::{Facet, SchemaBuilder},
+        Document,
+    };
+
+    #[test]
+    fn test_facet_not_populated_for_all_docs() -> crate::Result<()> {
+        let mut schema_builder = SchemaBuilder::default();
+        let facet_field = schema_builder.add_facet_field("facet");
+        let schema = schema_builder.build();
+        let index = Index::create_in_ram(schema);
+        let mut index_writer = index.writer_for_tests()?;
+        index_writer.add_document(doc!(facet_field=>Facet::from_text("/a/b")));
+        index_writer.add_document(Document::default());
+        index_writer.commit()?;
+        let searcher = index.reader()?.searcher();
+        let facet_reader = searcher
+            .segment_reader(0u32)
+            .facet_reader(facet_field)
+            .unwrap();
+        let mut facet_ords = Vec::new();
+        facet_reader.facet_ords(0u32, &mut facet_ords);
+        assert_eq!(&facet_ords, &[2u64]);
+        facet_reader.facet_ords(1u32, &mut facet_ords);
+        assert!(facet_ords.is_empty());
+        Ok(())
+    }
+    #[test]
+    fn test_facet_not_populated_for_any_docs() -> crate::Result<()> {
+        let mut schema_builder = SchemaBuilder::default();
+        let facet_field = schema_builder.add_facet_field("facet");
+        let schema = schema_builder.build();
+        let index = Index::create_in_ram(schema);
+        let mut index_writer = index.writer_for_tests()?;
+        index_writer.add_document(Document::default());
+        index_writer.add_document(Document::default());
+        index_writer.commit()?;
+        let searcher = index.reader()?.searcher();
+        let facet_reader = searcher
+            .segment_reader(0u32)
+            .facet_reader(facet_field)
+            .unwrap();
+        let mut facet_ords = Vec::new();
+        facet_reader.facet_ords(0u32, &mut facet_ords);
+        assert!(facet_ords.is_empty());
+        facet_reader.facet_ords(1u32, &mut facet_ords);
+        assert!(facet_ords.is_empty());
+        Ok(())
     }
 }

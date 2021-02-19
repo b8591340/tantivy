@@ -10,26 +10,19 @@ use crate::DocId;
 /// The `idx_reader` associated, for each document, the index of its first value.
 ///
 #[derive(Clone)]
-pub struct MultiValueIntFastFieldReader<Item: FastValue> {
+pub struct MultiValuedFastFieldReader<Item: FastValue> {
     idx_reader: FastFieldReader<u64>,
     vals_reader: FastFieldReader<Item>,
 }
 
-impl<Item: FastValue> MultiValueIntFastFieldReader<Item> {
+impl<Item: FastValue> MultiValuedFastFieldReader<Item> {
     pub(crate) fn open(
         idx_reader: FastFieldReader<u64>,
         vals_reader: FastFieldReader<Item>,
-    ) -> MultiValueIntFastFieldReader<Item> {
-        MultiValueIntFastFieldReader {
+    ) -> MultiValuedFastFieldReader<Item> {
+        MultiValuedFastFieldReader {
             idx_reader,
             vals_reader,
-        }
-    }
-
-    pub(crate) fn into_u64s_reader(self) -> MultiValueIntFastFieldReader<u64> {
-        MultiValueIntFastFieldReader {
-            idx_reader: self.idx_reader,
-            vals_reader: self.vals_reader.into_u64_reader(),
         }
     }
 
@@ -74,7 +67,7 @@ mod tests {
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
         let mut index_writer = index
-            .writer_with_num_threads(1, 30_000_000)
+            .writer_for_tests()
             .expect("Failed to create index writer.");
         index_writer.add_document(doc!(
             facet_field => Facet::from("/category/cat2"),

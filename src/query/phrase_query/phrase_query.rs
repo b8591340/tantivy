@@ -8,6 +8,7 @@ use crate::schema::IndexRecordOption;
 use crate::schema::{Field, Term};
 use crate::termdict::TermDictionary;
 use std::collections::BTreeSet;
+use std::io;
 
 /// `PhraseQuery` matches a specific sequence of words.
 ///
@@ -97,7 +98,7 @@ impl PhraseQuery {
             )));
         }
         let terms = self.phrase_terms();
-        let bm25_weight = BM25Weight::for_terms(searcher, &terms);
+        let bm25_weight = BM25Weight::for_terms(searcher, &terms)?;
         Ok(PhraseWeight::new(
             self.phrase_terms.clone(),
             bm25_weight,
@@ -120,13 +121,14 @@ impl Query for PhraseQuery {
         terminfo_set: &mut BTreeSet<TermInfo>,
         term_dict: &TermDictionary,
         field: Field,
-    ) {
+    ) -> io::Result<()> {
         if self.field == field {
             for (_, query_term) in &self.phrase_terms {
                 term_dict
-                    .get(query_term.text())
+                    .get(query_term.text())?
                     .map(|terminfo| terminfo_set.insert(terminfo));
             }
         }
+        Ok(())
     }
 }

@@ -1,87 +1,110 @@
 use super::decompress;
-use super::skiplist::SkipList;
-use crate::common::BinarySerializable;
+use super::index::SkipIndex;
 use crate::common::VInt;
-use crate::directory::ReadOnlySource;
+use crate::common::{BinarySerializable, HasLen};
+use crate::directory::{FileSlice, OwnedBytes};
 use crate::schema::Document;
 use crate::space_usage::StoreSpaceUsage;
+use crate::store::index::Checkpoint;
 use crate::DocId;
-use std::cell::RefCell;
+use lru::LruCache;
 use std::io;
 use std::mem::size_of;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+const LRU_CACHE_CAPACITY: usize = 100;
+
+type Block = Arc<Vec<u8>>;
+
+type BlockCache = Arc<Mutex<LruCache<u64, Block>>>;
 
 /// Reads document off tantivy's [`Store`](./index.html)
-#[derive(Clone)]
 pub struct StoreReader {
-    data: ReadOnlySource,
-    offset_index_source: ReadOnlySource,
-    current_block_offset: RefCell<usize>,
-    current_block: RefCell<Vec<u8>>,
-    max_doc: DocId,
+    data: FileSlice,
+    cache: BlockCache,
+    cache_hits: Arc<AtomicUsize>,
+    cache_misses: Arc<AtomicUsize>,
+    skip_index: Arc<SkipIndex>,
+    space_usage: StoreSpaceUsage,
 }
 
 impl StoreReader {
     /// Opens a store reader
-    pub fn from_source(data: ReadOnlySource) -> StoreReader {
-        let (data_source, offset_index_source, max_doc) = split_source(data);
-        StoreReader {
-            data: data_source,
-            offset_index_source,
-            current_block_offset: RefCell::new(usize::max_value()),
-            current_block: RefCell::new(Vec::new()),
-            max_doc,
+    pub fn open(store_file: FileSlice) -> io::Result<StoreReader> {
+        let (data_file, offset_index_file) = split_file(store_file)?;
+        let index_data = offset_index_file.read_bytes()?;
+        let space_usage = StoreSpaceUsage::new(data_file.len(), offset_index_file.len());
+        let skip_index = SkipIndex::open(index_data);
+        Ok(StoreReader {
+            data: data_file,
+            cache: Arc::new(Mutex::new(LruCache::new(LRU_CACHE_CAPACITY))),
+            cache_hits: Default::default(),
+            cache_misses: Default::default(),
+            skip_index: Arc::new(skip_index),
+            space_usage,
+        })
+    }
+
+    pub(crate) fn block_checkpoints(&self) -> impl Iterator<Item = Checkpoint> + '_ {
+        self.skip_index.checkpoints()
+    }
+
+    fn block_checkpoint(&self, doc_id: DocId) -> Option<Checkpoint> {
+        self.skip_index.seek(doc_id)
+    }
+
+    pub(crate) fn block_data(&self) -> io::Result<OwnedBytes> {
+        self.data.read_bytes()
+    }
+
+    fn compressed_block(&self, checkpoint: &Checkpoint) -> io::Result<OwnedBytes> {
+        self.data
+            .slice(
+                checkpoint.start_offset as usize,
+                checkpoint.end_offset as usize,
+            )
+            .read_bytes()
+    }
+
+    fn read_block(&self, checkpoint: &Checkpoint) -> io::Result<Block> {
+        if let Some(block) = self.cache.lock().unwrap().get(&checkpoint.start_offset) {
+            self.cache_hits.fetch_add(1, Ordering::SeqCst);
+            return Ok(block.clone());
         }
-    }
 
-    pub(crate) fn block_index(&self) -> SkipList<'_, u64> {
-        SkipList::from(self.offset_index_source.as_slice())
-    }
+        self.cache_misses.fetch_add(1, Ordering::SeqCst);
 
-    fn block_offset(&self, doc_id: DocId) -> (DocId, u64) {
-        self.block_index()
-            .seek(u64::from(doc_id) + 1)
-            .map(|(doc, offset)| (doc as DocId, offset))
-            .unwrap_or((0u32, 0u64))
-    }
+        let compressed_block = self.compressed_block(checkpoint)?;
+        let mut decompressed_block = vec![];
+        decompress(compressed_block.as_slice(), &mut decompressed_block)?;
 
-    pub(crate) fn block_data(&self) -> &[u8] {
-        self.data.as_slice()
-    }
+        let block = Arc::new(decompressed_block);
+        self.cache
+            .lock()
+            .unwrap()
+            .put(checkpoint.start_offset, block.clone());
 
-    fn compressed_block(&self, addr: usize) -> &[u8] {
-        let total_buffer = self.data.as_slice();
-        let mut buffer = &total_buffer[addr..];
-        let block_len = u32::deserialize(&mut buffer).expect("") as usize;
-        &buffer[..block_len]
-    }
-
-    fn read_block(&self, block_offset: usize) -> io::Result<()> {
-        if block_offset != *self.current_block_offset.borrow() {
-            let mut current_block_mut = self.current_block.borrow_mut();
-            current_block_mut.clear();
-            let compressed_block = self.compressed_block(block_offset);
-            decompress(compressed_block, &mut current_block_mut)?;
-            *self.current_block_offset.borrow_mut() = block_offset;
-        }
-        Ok(())
+        Ok(block)
     }
 
     /// Reads a given document.
     ///
     /// Calling `.get(doc)` is relatively costly as it requires
-    /// decompressing a LZ4-compressed block.
+    /// decompressing a compressed block.
     ///
     /// It should not be called to score documents
     /// for instance.
     pub fn get(&self, doc_id: DocId) -> crate::Result<Document> {
-        let (first_doc_id, block_offset) = self.block_offset(doc_id);
-        self.read_block(block_offset as usize)?;
-        let current_block_mut = self.current_block.borrow_mut();
-        let mut cursor = &current_block_mut[..];
-        for _ in first_doc_id..doc_id {
+        let checkpoint = self.block_checkpoint(doc_id).ok_or_else(|| {
+            crate::TantivyError::InvalidArgument(format!("Failed to lookup Doc #{}.", doc_id))
+        })?;
+        let mut cursor = &self.read_block(&checkpoint)?[..];
+        for _ in checkpoint.start_doc..doc_id {
             let doc_length = VInt::deserialize(&mut cursor)?.val() as usize;
             cursor = &cursor[doc_length..];
         }
+
         let doc_length = VInt::deserialize(&mut cursor)?.val() as usize;
         cursor = &cursor[..doc_length];
         Ok(Document::deserialize(&mut cursor)?)
@@ -89,21 +112,93 @@ impl StoreReader {
 
     /// Summarize total space usage of this store reader.
     pub fn space_usage(&self) -> StoreSpaceUsage {
-        StoreSpaceUsage::new(self.data.len(), self.offset_index_source.len())
+        self.space_usage.clone()
     }
 }
 
-fn split_source(data: ReadOnlySource) -> (ReadOnlySource, ReadOnlySource, DocId) {
-    let data_len = data.len();
-    let footer_offset = data_len - size_of::<u64>() - size_of::<u32>();
-    let serialized_offset: ReadOnlySource = data.slice(footer_offset, data_len);
+fn split_file(data: FileSlice) -> io::Result<(FileSlice, FileSlice)> {
+    let (data, footer_len_bytes) = data.split_from_end(size_of::<u64>());
+    let serialized_offset: OwnedBytes = footer_len_bytes.read_bytes()?;
     let mut serialized_offset_buf = serialized_offset.as_slice();
-    let offset = u64::deserialize(&mut serialized_offset_buf).unwrap();
-    let offset = offset as usize;
-    let max_doc = u32::deserialize(&mut serialized_offset_buf).unwrap();
-    (
-        data.slice(0, offset),
-        data.slice(offset, footer_offset),
-        max_doc,
-    )
+    let offset = u64::deserialize(&mut serialized_offset_buf)? as usize;
+    Ok(data.split(offset))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::Document;
+    use crate::schema::Field;
+    use crate::{directory::RAMDirectory, store::tests::write_lorem_ipsum_store, Directory};
+    use std::path::Path;
+
+    fn get_text_field<'a>(doc: &'a Document, field: &'a Field) -> Option<&'a str> {
+        doc.get_first(*field).and_then(|f| f.text())
+    }
+
+    #[test]
+    fn test_store_lru_cache() -> crate::Result<()> {
+        let directory = RAMDirectory::create();
+        let path = Path::new("store");
+        let writer = directory.open_write(path)?;
+        let schema = write_lorem_ipsum_store(writer, 500);
+        let title = schema.get_field("title").unwrap();
+        let store_file = directory.open_read(path)?;
+        let store = StoreReader::open(store_file)?;
+
+        assert_eq!(store.cache.lock().unwrap().len(), 0);
+        assert_eq!(store.cache_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(store.cache_misses.load(Ordering::SeqCst), 0);
+
+        let doc = store.get(0)?;
+        assert_eq!(get_text_field(&doc, &title), Some("Doc 0"));
+
+        assert_eq!(store.cache.lock().unwrap().len(), 1);
+        assert_eq!(store.cache_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(store.cache_misses.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store
+                .cache
+                .lock()
+                .unwrap()
+                .peek_lru()
+                .map(|(&k, _)| k as usize),
+            Some(0)
+        );
+
+        let doc = store.get(499)?;
+        assert_eq!(get_text_field(&doc, &title), Some("Doc 499"));
+
+        assert_eq!(store.cache.lock().unwrap().len(), 2);
+        assert_eq!(store.cache_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(store.cache_misses.load(Ordering::SeqCst), 2);
+
+        assert_eq!(
+            store
+                .cache
+                .lock()
+                .unwrap()
+                .peek_lru()
+                .map(|(&k, _)| k as usize),
+            Some(0)
+        );
+
+        let doc = store.get(0)?;
+        assert_eq!(get_text_field(&doc, &title), Some("Doc 0"));
+
+        assert_eq!(store.cache.lock().unwrap().len(), 2);
+        assert_eq!(store.cache_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(store.cache_misses.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            store
+                .cache
+                .lock()
+                .unwrap()
+                .peek_lru()
+                .map(|(&k, _)| k as usize),
+            Some(18806)
+        );
+
+        Ok(())
+    }
 }

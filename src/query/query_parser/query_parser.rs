@@ -21,51 +21,52 @@ use std::str::FromStr;
 use tantivy_query_grammar::{UserInputAST, UserInputBound, UserInputLeaf};
 
 /// Possible error that may happen when parsing a query.
-#[derive(Debug, PartialEq, Eq, Fail)]
+#[derive(Debug, PartialEq, Eq, Error)]
 pub enum QueryParserError {
     /// Error in the query syntax
-    #[fail(display = "Syntax Error")]
+    #[error("Syntax Error")]
     SyntaxError,
     /// `FieldDoesNotExist(field_name: String)`
     /// The query references a field that is not in the schema
-    #[fail(display = "File does not exists: '{:?}'", _0)]
+    #[error("File does not exists: '{0:?}'")]
     FieldDoesNotExist(String),
     /// The query contains a term for a `u64` or `i64`-field, but the value
     /// is neither.
-    #[fail(display = "Expected a valid integer: '{:?}'", _0)]
+    #[error("Expected a valid integer: '{0:?}'")]
     ExpectedInt(ParseIntError),
+    /// The query contains a term for a bytes field, but the value is not valid
+    /// base64.
+    #[error("Expected base64: '{0:?}'")]
+    ExpectedBase64(base64::DecodeError),
     /// The query contains a term for a `f64`-field, but the value
     /// is not a f64.
-    #[fail(display = "Invalid query: Only excluding terms given")]
+    #[error("Invalid query: Only excluding terms given")]
     ExpectedFloat(ParseFloatError),
     /// It is forbidden queries that are only "excluding". (e.g. -title:pop)
-    #[fail(display = "Invalid query: Only excluding terms given")]
+    #[error("Invalid query: Only excluding terms given")]
     AllButQueryForbidden,
     /// If no default field is declared, running a query without any
     /// field specified is forbbidden.
-    #[fail(display = "No default field declared and no field specified in query")]
+    #[error("No default field declared and no field specified in query")]
     NoDefaultFieldDeclared,
     /// The field searched for is not declared
     /// as indexed in the schema.
-    #[fail(display = "The field '{:?}' is not declared as indexed", _0)]
+    #[error("The field '{0:?}' is not declared as indexed")]
     FieldNotIndexed(String),
     /// A phrase query was requested for a field that does not
     /// have any positions indexed.
-    #[fail(display = "The field '{:?}' does not have positions indexed", _0)]
+    #[error("The field '{0:?}' does not have positions indexed")]
     FieldDoesNotHavePositionsIndexed(String),
     /// The tokenizer for the given field is unknown
     /// The two argument strings are the name of the field, the name of the tokenizer
-    #[fail(
-        display = "The tokenizer '{:?}' for the field '{:?}' is unknown",
-        _0, _1
-    )]
+    #[error("The tokenizer '{0:?}' for the field '{1:?}' is unknown")]
     UnknownTokenizer(String, String),
     /// The query contains a range query with a phrase as one of the bounds.
     /// Only terms can be used as bounds.
-    #[fail(display = "A range query cannot have a phrase as one of the bounds")]
+    #[error("A range query cannot have a phrase as one of the bounds")]
     RangeMustNotHavePhrase,
     /// The format for the date field is not RFC 3339 compliant.
-    #[fail(display = "The date field has an invalid format")]
+    #[error("The date field has an invalid format")]
     DateFormatError(chrono::ParseError),
 }
 
@@ -360,9 +361,10 @@ impl QueryParser {
                 let facet = Facet::from_text(phrase);
                 Ok(vec![(0, Term::from_field_text(field, facet.encoded_str()))])
             }
-            FieldType::Bytes => {
-                let field_name = self.schema.get_field_name(field).to_string();
-                Err(QueryParserError::FieldNotIndexed(field_name))
+            FieldType::Bytes(_) => {
+                let bytes = base64::decode(phrase).map_err(QueryParserError::ExpectedBase64)?;
+                let term = Term::from_field_bytes(field, &bytes);
+                Ok(vec![(0, term)])
             }
         }
     }
@@ -555,7 +557,7 @@ fn convert_to_query(logical_ast: LogicalAST) -> Box<dyn Query> {
                 !occur_subqueries.is_empty(),
                 "Should not be empty after trimming"
             );
-            Box::new(BooleanQuery::from(occur_subqueries))
+            Box::new(BooleanQuery::new(occur_subqueries))
         }
         Some(LogicalAST::Leaf(trimmed_logical_literal)) => {
             convert_literal_to_query(*trimmed_logical_literal)
@@ -604,6 +606,8 @@ mod test {
         schema_builder.add_date_field("date", INDEXED);
         schema_builder.add_f64_field("float", INDEXED);
         schema_builder.add_facet_field("facet");
+        schema_builder.add_bytes_field("bytes", INDEXED);
+        schema_builder.add_bytes_field("bytes_not_indexed", STORED);
         schema_builder.build()
     }
 
@@ -789,6 +793,37 @@ mod test {
             ),
             false,
         );
+    }
+
+    #[test]
+    fn test_parse_bytes() {
+        test_parse_query_to_logical_ast_helper(
+            "bytes:YnVidQ==",
+            "Term(field=12,bytes=[98, 117, 98, 117])",
+            false,
+        );
+    }
+
+    #[test]
+    fn test_parse_bytes_not_indexed() {
+        let error = parse_query_to_logical_ast("bytes_not_indexed:aaa", false).unwrap_err();
+        assert!(matches!(error, QueryParserError::FieldNotIndexed(_)));
+    }
+
+    #[test]
+    fn test_parse_bytes_phrase() {
+        test_parse_query_to_logical_ast_helper(
+            "bytes:\"YnVidQ==\"",
+            "Term(field=12,bytes=[98, 117, 98, 117])",
+            false,
+        );
+    }
+
+    #[test]
+    fn test_parse_bytes_invalid_base64() {
+        let base64_err: QueryParserError =
+            parse_query_to_logical_ast("bytes:aa", false).unwrap_err();
+        assert!(matches!(base64_err, QueryParserError::ExpectedBase64(_)));
     }
 
     #[test]

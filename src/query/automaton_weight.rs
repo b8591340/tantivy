@@ -5,9 +5,9 @@ use crate::query::{BitSetDocSet, Explanation};
 use crate::query::{Scorer, Weight};
 use crate::schema::{Field, IndexRecordOption};
 use crate::termdict::{TermDictionary, TermStreamer};
-use crate::Result;
 use crate::TantivyError;
 use crate::{DocId, Score};
+use std::io;
 use std::sync::Arc;
 use tantivy_fst::Automaton;
 
@@ -20,6 +20,7 @@ pub struct AutomatonWeight<A> {
 impl<A> AutomatonWeight<A>
 where
     A: Automaton + Send + Sync + 'static,
+    A::State: Clone,
 {
     /// Create a new AutomationWeight
     pub fn new<IntoArcA: Into<Arc<A>>>(field: Field, automaton: IntoArcA) -> AutomatonWeight<A> {
@@ -32,7 +33,7 @@ where
     pub(crate) fn automaton_stream<'a>(
         &'a self,
         term_dict: &'a TermDictionary,
-    ) -> TermStreamer<'a, &'a A> {
+    ) -> io::Result<TermStreamer<'a, &'a A>> {
         let automaton: &A = &*self.automaton;
         let term_stream_builder = term_dict.search(automaton);
         term_stream_builder.into_stream()
@@ -42,17 +43,18 @@ where
 impl<A> Weight for AutomatonWeight<A>
 where
     A: Automaton + Send + Sync + 'static,
+    A::State: Clone,
 {
-    fn scorer(&self, reader: &SegmentReader, boost: Score) -> Result<Box<dyn Scorer>> {
+    fn scorer(&self, reader: &SegmentReader, boost: Score) -> crate::Result<Box<dyn Scorer>> {
         let max_doc = reader.max_doc();
         let mut doc_bitset = BitSet::with_max_value(max_doc);
-        let inverted_index = reader.inverted_index(self.field);
+        let inverted_index = reader.inverted_index(self.field)?;
         let term_dict = inverted_index.terms();
-        let mut term_stream = self.automaton_stream(term_dict);
+        let mut term_stream = self.automaton_stream(term_dict)?;
         while term_stream.advance() {
             let term_info = term_stream.value();
             let mut block_segment_postings = inverted_index
-                .read_block_postings_from_terminfo(term_info, IndexRecordOption::Basic);
+                .read_block_postings_from_terminfo(term_info, IndexRecordOption::Basic)?;
             loop {
                 let docs = block_segment_postings.docs();
                 if docs.is_empty() {
@@ -69,7 +71,7 @@ where
         Ok(Box::new(const_scorer))
     }
 
-    fn explain(&self, reader: &SegmentReader, doc: DocId) -> Result<Explanation> {
+    fn explain(&self, reader: &SegmentReader, doc: DocId) -> crate::Result<Explanation> {
         let mut scorer = self.scorer(reader, 1.0)?;
         if scorer.seek(doc) == doc {
             Ok(Explanation::new("AutomatonScorer", 1.0))
@@ -94,7 +96,7 @@ mod tests {
         let mut schema = Schema::builder();
         let title = schema.add_text_field("title", STRING);
         let index = Index::create_in_ram(schema.build());
-        let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+        let mut index_writer = index.writer_for_tests().unwrap();
         index_writer.add_document(doc!(title=>"abc"));
         index_writer.add_document(doc!(title=>"bcd"));
         index_writer.add_document(doc!(title=>"abcd"));
@@ -102,6 +104,7 @@ mod tests {
         index
     }
 
+    #[derive(Clone, Copy)]
     enum State {
         Start,
         NotMatching,

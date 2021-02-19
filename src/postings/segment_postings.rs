@@ -1,20 +1,12 @@
 use crate::common::HasLen;
-
 use crate::docset::DocSet;
-use crate::positions::PositionReader;
-
-use crate::postings::compression::COMPRESSION_BLOCK_SIZE;
-use crate::postings::serializer::PostingsSerializer;
-use crate::postings::BlockSearcher;
-
-use crate::postings::Postings;
-
-use crate::schema::IndexRecordOption;
-use crate::{DocId, TERMINATED};
-
-use crate::directory::ReadOnlySource;
 use crate::fastfield::DeleteBitSet;
+use crate::positions::PositionReader;
+use crate::postings::compression::COMPRESSION_BLOCK_SIZE;
+use crate::postings::BlockSearcher;
 use crate::postings::BlockSegmentPostings;
+use crate::postings::Postings;
+use crate::{DocId, TERMINATED};
 
 /// `SegmentPostings` represents the inverted list or postings associated to
 /// a term in a `Segment`.
@@ -73,11 +65,15 @@ impl SegmentPostings {
     /// It serializes the doc ids using tantivy's codec
     /// and returns a `SegmentPostings` object that embeds a
     /// buffer with the serialized data.
+    #[cfg(test)]
     pub fn create_from_docs(docs: &[u32]) -> SegmentPostings {
+        use crate::directory::FileSlice;
+        use crate::postings::serializer::PostingsSerializer;
+        use crate::schema::IndexRecordOption;
         let mut buffer = Vec::new();
         {
             let mut postings_serializer =
-                PostingsSerializer::new(&mut buffer, 0.0, false, false, None);
+                PostingsSerializer::new(&mut buffer, 0.0, IndexRecordOption::Basic, None);
             postings_serializer.new_term(docs.len() as u32);
             for &doc in docs {
                 postings_serializer.write_doc(doc, 1u32);
@@ -86,12 +82,13 @@ impl SegmentPostings {
                 .close_term(docs.len() as u32)
                 .expect("In memory Serialization should never fail.");
         }
-        let block_segment_postings = BlockSegmentPostings::from_data(
+        let block_segment_postings = BlockSegmentPostings::open(
             docs.len() as u32,
-            ReadOnlySource::from(buffer),
+            FileSlice::from(buffer),
             IndexRecordOption::Basic,
             IndexRecordOption::Basic,
-        );
+        )
+        .unwrap();
         SegmentPostings::from_block_postings(block_segment_postings, None)
     }
 
@@ -101,7 +98,10 @@ impl SegmentPostings {
         doc_and_tfs: &[(u32, u32)],
         fieldnorms: Option<&[u32]>,
     ) -> SegmentPostings {
+        use crate::directory::FileSlice;
         use crate::fieldnorm::FieldNormReader;
+        use crate::postings::serializer::PostingsSerializer;
+        use crate::schema::IndexRecordOption;
         use crate::Score;
         let mut buffer: Vec<u8> = Vec::new();
         let fieldnorm_reader = fieldnorms.map(FieldNormReader::for_test);
@@ -114,14 +114,13 @@ impl SegmentPostings {
                     .iter()
                     .map(|&fieldnorm| fieldnorm as u64)
                     .sum::<u64>();
-                total_num_tokens as Score / fieldnorms.len() as f32
+                total_num_tokens as Score / fieldnorms.len() as Score
             })
             .unwrap_or(0.0);
         let mut postings_serializer = PostingsSerializer::new(
             &mut buffer,
             average_field_norm,
-            true,
-            false,
+            IndexRecordOption::WithFreqs,
             fieldnorm_reader,
         );
         postings_serializer.new_term(doc_and_tfs.len() as u32);
@@ -131,12 +130,13 @@ impl SegmentPostings {
         postings_serializer
             .close_term(doc_and_tfs.len() as u32)
             .unwrap();
-        let block_segment_postings = BlockSegmentPostings::from_data(
+        let block_segment_postings = BlockSegmentPostings::open(
             doc_and_tfs.len() as u32,
-            ReadOnlySource::from(buffer),
+            FileSlice::from(buffer),
             IndexRecordOption::WithFreqs,
             IndexRecordOption::WithFreqs,
-        );
+        )
+        .unwrap();
         SegmentPostings::from_block_postings(block_segment_postings, None)
     }
 
@@ -203,7 +203,7 @@ impl DocSet for SegmentPostings {
     }
 
     /// Return the current document's `DocId`.
-    #[inline]
+    #[inline(always)]
     fn doc(&self) -> DocId {
         self.block_cursor.doc(self.cur)
     }

@@ -38,12 +38,8 @@ fn posting_from_field_entry(field_entry: &FieldEntry) -> Box<dyn PostingsWriter>
         | FieldType::I64(_)
         | FieldType::F64(_)
         | FieldType::Date(_)
+        | FieldType::Bytes(_)
         | FieldType::HierarchicalFacet => SpecializedPostingsWriter::<NothingRecorder>::new_boxed(),
-        FieldType::Bytes => {
-            // FieldType::Bytes cannot actually be indexed.
-            // TODO fix during the indexer refactoring described in #276
-            SpecializedPostingsWriter::<NothingRecorder>::new_boxed()
-        }
     }
 }
 
@@ -105,6 +101,7 @@ impl MultiFieldPostingsWriter {
         doc: DocId,
         field: Field,
         token_stream: &mut dyn TokenStream,
+        term_buffer: &mut Term,
     ) -> u32 {
         let postings_writer =
             self.per_field_postings_writers[field.field_id() as usize].deref_mut();
@@ -114,6 +111,7 @@ impl MultiFieldPostingsWriter {
             field,
             token_stream,
             &mut self.heap,
+            term_buffer,
         )
     }
 
@@ -159,11 +157,12 @@ impl MultiFieldPostingsWriter {
                     unordered_term_mappings.insert(field, mapping);
                 }
                 FieldType::U64(_) | FieldType::I64(_) | FieldType::F64(_) | FieldType::Date(_) => {}
-                FieldType::Bytes => {}
+                FieldType::Bytes(_) => {}
             }
 
-            let postings_writer = &self.per_field_postings_writers[field.field_id() as usize];
-            let fieldnorm_reader = fieldnorm_readers.get_field(field);
+            let postings_writer =
+                self.per_field_postings_writers[field.field_id() as usize].as_ref();
+            let fieldnorm_reader = fieldnorm_readers.get_field(field)?;
             let mut field_serializer = serializer.new_field(
                 field,
                 postings_writer.total_num_tokens(),
@@ -220,13 +219,20 @@ pub trait PostingsWriter {
         field: Field,
         token_stream: &mut dyn TokenStream,
         heap: &mut MemoryArena,
+        term_buffer: &mut Term,
     ) -> u32 {
-        let mut term = Term::for_field(field);
+        term_buffer.set_field(field);
         let mut sink = |token: &Token| {
             // We skip all tokens with a len greater than u16.
             if token.text.len() <= MAX_TOKEN_LEN {
-                term.set_text(token.text.as_str());
-                self.subscribe(term_index, doc_id, token.position as u32, &term, heap);
+                term_buffer.set_text(token.text.as_str());
+                self.subscribe(
+                    term_index,
+                    doc_id,
+                    token.position as u32,
+                    &term_buffer,
+                    heap,
+                );
             } else {
                 info!(
                     "A token exceeding MAX_TOKEN_LEN ({}>{}) was dropped. Search for \

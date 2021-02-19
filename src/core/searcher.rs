@@ -1,6 +1,6 @@
 use crate::collector::Collector;
 use crate::core::Executor;
-use crate::core::InvertedIndexReader;
+
 use crate::core::SegmentReader;
 use crate::docset::DocSet;
 use crate::postings::Postings;
@@ -10,12 +10,11 @@ use crate::schema::{Field, Term};
 use crate::schema::{FieldType, Schema, Type};
 use crate::space_usage::SearcherSpaceUsage;
 use crate::store::StoreReader;
-use crate::termdict::TermMerger;
 use crate::DocAddress;
 use crate::Index;
 use std::collections::BTreeSet;
-use std::fmt;
 use std::sync::Arc;
+use std::{fmt, io};
 
 /// Holds a list of `SegmentReader`s ready for search.
 ///
@@ -35,17 +34,17 @@ impl Searcher {
         schema: Schema,
         index: Index,
         segment_readers: Vec<SegmentReader>,
-    ) -> Searcher {
-        let store_readers = segment_readers
+    ) -> io::Result<Searcher> {
+        let store_readers: Vec<StoreReader> = segment_readers
             .iter()
             .map(SegmentReader::get_store_reader)
-            .collect();
-        Searcher {
+            .collect::<io::Result<Vec<_>>>()?;
+        Ok(Searcher {
             schema,
             index,
             segment_readers,
             store_readers,
-        }
+        })
     }
 
     /// Returns the `Index` associated to the `Searcher`
@@ -78,13 +77,14 @@ impl Searcher {
 
     /// Return the overall number of documents containing
     /// the given term.
-    pub fn doc_freq(&self, term: &Term) -> u64 {
-        self.segment_readers
-            .iter()
-            .map(|segment_reader| {
-                u64::from(segment_reader.inverted_index(term.field()).doc_freq(term))
-            })
-            .sum::<u64>()
+    pub fn doc_freq(&self, term: &Term) -> crate::Result<u64> {
+        let mut total_doc_freq = 0;
+        for segment_reader in &self.segment_readers {
+            let inverted_index = segment_reader.inverted_index(term.field())?;
+            let doc_freq = inverted_index.doc_freq(term)?;
+            total_doc_freq += u64::from(doc_freq);
+        }
+        Ok(total_doc_freq)
     }
 
     /// Return the list of segment readers
@@ -150,21 +150,16 @@ impl Searcher {
         collector.merge_fruits(fruits)
     }
 
-    /// Return the field searcher associated to a `Field`.
-    pub fn field(&self, field: Field) -> FieldSearcher {
-        let inv_index_readers = self
-            .segment_readers
-            .iter()
-            .map(|segment_reader| segment_reader.inverted_index(field))
-            .collect::<Vec<_>>();
-        FieldSearcher::new(inv_index_readers)
-    }
-
     /// Return the positions of the given `DocAddress`, `Field`, `Query` combination
     /// for a `DocAddress` returned by `Query` wherein `Field` appears at least once.
     ///
     /// Requires the text field to be indexed with `IndexRecordOption::WithFreqsAndPositions`.
-    pub fn positions(&self, query: &dyn Query, field: Field, address: DocAddress) -> Vec<u32> {
+    pub fn positions(
+        &self,
+        query: &dyn Query,
+        field: Field,
+        address: DocAddress,
+    ) -> crate::Result<Vec<u32>> {
         debug_assert!(self
             .schema
             .get_field_entry(field)
@@ -173,55 +168,36 @@ impl Searcher {
             .map(|it| it.has_positions())
             .unwrap_or(false));
         let DocAddress(segment_ord, doc_id) = address;
-        let segment_reader = self.segment_reader(segment_ord);
-        let inverted_index = segment_reader.inverted_index(field);
-        let term_dict = inverted_index.terms();
+        let inverted_index = self.segment_reader(segment_ord).inverted_index(field)?;
         let mut terminfos = BTreeSet::new();
-        query.terminfos(&mut terminfos, term_dict, field);
+        query.terminfos(&mut terminfos, inverted_index.terms(), field)?;
         terminfos
             .into_iter()
-            .flat_map(move |term_info| {
-                let mut postings = inverted_index.read_postings_from_terminfo(
-                    &term_info,
-                    IndexRecordOption::WithFreqsAndPositions,
-                );
-                let mut positions = vec![];
-                if postings.seek(doc_id) == doc_id {
-                    postings.positions(&mut positions);
-                }
-                positions
+            .try_fold(vec![], move |mut acc, term_info| {
+                inverted_index
+                    .read_postings_from_terminfo(
+                        &term_info,
+                        IndexRecordOption::WithFreqsAndPositions,
+                    )
+                    .map(|mut postings| {
+                        let mut positions = vec![];
+                        if postings.seek(doc_id) == doc_id {
+                            postings.positions(&mut positions);
+                        }
+                        acc.append(&mut positions);
+                        acc
+                    })
             })
-            .collect()
+            .map_err(|err| err.into())
     }
 
     /// Summarize total space usage of this searcher.
-    pub fn space_usage(&self) -> SearcherSpaceUsage {
+    pub fn space_usage(&self) -> io::Result<SearcherSpaceUsage> {
         let mut space_usage = SearcherSpaceUsage::new();
-        for segment_reader in self.segment_readers.iter() {
-            space_usage.add_segment(segment_reader.space_usage());
+        for segment_reader in &self.segment_readers {
+            space_usage.add_segment(segment_reader.space_usage()?);
         }
-        space_usage
-    }
-}
-
-pub struct FieldSearcher {
-    inv_index_readers: Vec<Arc<InvertedIndexReader>>,
-}
-
-impl FieldSearcher {
-    fn new(inv_index_readers: Vec<Arc<InvertedIndexReader>>) -> FieldSearcher {
-        FieldSearcher { inv_index_readers }
-    }
-
-    /// Returns a Stream over all of the sorted unique terms of
-    /// for the given field.
-    pub fn terms(&self) -> TermMerger<'_> {
-        let term_streamers: Vec<_> = self
-            .inv_index_readers
-            .iter()
-            .map(|inverted_index| inverted_index.terms().stream())
-            .collect();
-        TermMerger::new(term_streamers)
+        Ok(space_usage)
     }
 }
 

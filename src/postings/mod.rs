@@ -15,20 +15,14 @@ mod stacker;
 mod term_info;
 
 pub(crate) use self::block_search::BlockSearcher;
-
-pub(crate) use self::postings_writer::MultiFieldPostingsWriter;
-pub use self::serializer::{FieldSerializer, InvertedIndexSerializer};
-
-pub use self::postings::Postings;
-pub(crate) use self::skip::{BlockInfo, SkipReader};
-pub use self::term_info::TermInfo;
-
 pub use self::block_segment_postings::BlockSegmentPostings;
+pub use self::postings::Postings;
+pub(crate) use self::postings_writer::MultiFieldPostingsWriter;
 pub use self::segment_postings::SegmentPostings;
-
+pub use self::serializer::{FieldSerializer, InvertedIndexSerializer};
+pub(crate) use self::skip::{BlockInfo, SkipReader};
 pub(crate) use self::stacker::compute_table_size;
-
-pub use crate::common::HasLen;
+pub use self::term_info::TermInfo;
 
 pub(crate) type UnorderedTermId = u64;
 
@@ -42,8 +36,8 @@ pub(crate) enum FreqReadingOption {
 
 #[cfg(test)]
 pub mod tests {
-
-    use super::*;
+    use super::InvertedIndexSerializer;
+    use super::Postings;
     use crate::core::Index;
     use crate::core::SegmentComponent;
     use crate::core::SegmentReader;
@@ -53,16 +47,14 @@ pub mod tests {
     use crate::indexer::SegmentWriter;
     use crate::merge_policy::NoMergePolicy;
     use crate::query::Scorer;
-    use crate::schema::{Document, Schema, Term, INDEXED, STRING, TEXT};
     use crate::schema::{Field, TextOptions};
     use crate::schema::{IndexRecordOption, TextFieldIndexing};
+    use crate::schema::{Schema, Term, INDEXED, TEXT};
     use crate::tokenizer::{SimpleTokenizer, MAX_TOKEN_LEN};
     use crate::DocId;
+    use crate::HasLen;
     use crate::Score;
-    use once_cell::sync::Lazy;
-    use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
-    use std::iter;
+    use std::{iter, mem};
 
     #[test]
     pub fn test_position_write() -> crate::Result<()> {
@@ -79,6 +71,7 @@ pub mod tests {
             field_serializer.write_doc(doc_id, 4, &delta_positions)?;
         }
         field_serializer.close_term()?;
+        mem::drop(field_serializer);
         posting_serializer.close()?;
         let read = segment.open_read(SegmentComponent::POSITIONS)?;
         assert!(read.len() <= 140);
@@ -91,7 +84,7 @@ pub mod tests {
         let title = schema_builder.add_text_field("title", TEXT);
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
-        let mut index_writer = index.writer_with_num_threads(1, 30_000_000)?;
+        let mut index_writer = index.writer_for_tests()?;
         index_writer.add_document(doc!(title => r#"abc abc abc"#));
         index_writer.add_document(doc!(title => r#"abc be be be be abc"#));
         for _ in 0..1_000 {
@@ -101,12 +94,12 @@ pub mod tests {
         index_writer.commit()?;
 
         let searcher = index.reader()?.searcher();
-        let inverted_index = searcher.segment_reader(0u32).inverted_index(title);
+        let inverted_index = searcher.segment_reader(0u32).inverted_index(title)?;
         let term = Term::from_field_text(title, "abc");
         let mut positions = Vec::new();
         {
             let mut postings = inverted_index
-                .read_postings(&term, IndexRecordOption::WithFreqsAndPositions)
+                .read_postings(&term, IndexRecordOption::WithFreqsAndPositions)?
                 .unwrap();
             assert_eq!(postings.doc(), 0);
             postings.positions(&mut positions);
@@ -120,7 +113,7 @@ pub mod tests {
         }
         {
             let mut postings = inverted_index
-                .read_postings(&term, IndexRecordOption::WithFreqsAndPositions)
+                .read_postings(&term, IndexRecordOption::WithFreqsAndPositions)?
                 .unwrap();
             assert_eq!(postings.doc(), 0);
             assert_eq!(postings.advance(), 1);
@@ -129,7 +122,7 @@ pub mod tests {
         }
         {
             let mut postings = inverted_index
-                .read_postings(&term, IndexRecordOption::WithFreqsAndPositions)
+                .read_postings(&term, IndexRecordOption::WithFreqsAndPositions)?
                 .unwrap();
             assert_eq!(postings.seek(1), 1);
             assert_eq!(postings.doc(), 1);
@@ -138,7 +131,7 @@ pub mod tests {
         }
         {
             let mut postings = inverted_index
-                .read_postings(&term, IndexRecordOption::WithFreqsAndPositions)
+                .read_postings(&term, IndexRecordOption::WithFreqsAndPositions)?
                 .unwrap();
             assert_eq!(postings.seek(1002), 1002);
             assert_eq!(postings.doc(), 1002);
@@ -147,7 +140,7 @@ pub mod tests {
         }
         {
             let mut postings = inverted_index
-                .read_postings(&term, IndexRecordOption::WithFreqsAndPositions)
+                .read_postings(&term, IndexRecordOption::WithFreqsAndPositions)?
                 .unwrap();
             assert_eq!(postings.seek(100), 100);
             assert_eq!(postings.seek(1002), 1002);
@@ -159,7 +152,7 @@ pub mod tests {
     }
 
     #[test]
-    pub fn test_drop_token_that_are_too_long() {
+    pub fn test_drop_token_that_are_too_long() -> crate::Result<()> {
         let ok_token_text: String = iter::repeat('A').take(MAX_TOKEN_LEN).collect();
         let mut exceeding_token_text: String = iter::repeat('A').take(MAX_TOKEN_LEN + 1).collect();
         exceeding_token_text.push_str(" hello");
@@ -176,7 +169,7 @@ pub mod tests {
             .tokenizers()
             .register("simple_no_truncation", SimpleTokenizer);
         let reader = index.reader().unwrap();
-        let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+        let mut index_writer = index.writer_for_tests().unwrap();
         index_writer.set_merge_policy(Box::new(NoMergePolicy));
         {
             index_writer.add_document(doc!(text_field=>exceeding_token_text));
@@ -184,10 +177,10 @@ pub mod tests {
             reader.reload().unwrap();
             let searcher = reader.searcher();
             let segment_reader = searcher.segment_reader(0u32);
-            let inverted_index = segment_reader.inverted_index(text_field);
+            let inverted_index = segment_reader.inverted_index(text_field)?;
             assert_eq!(inverted_index.terms().num_terms(), 1);
             let mut bytes = vec![];
-            assert!(inverted_index.terms().ord_to_term(0, &mut bytes));
+            assert!(inverted_index.terms().ord_to_term(0, &mut bytes)?);
             assert_eq!(&bytes, b"hello");
         }
         {
@@ -196,16 +189,17 @@ pub mod tests {
             reader.reload().unwrap();
             let searcher = reader.searcher();
             let segment_reader = searcher.segment_reader(1u32);
-            let inverted_index = segment_reader.inverted_index(text_field);
+            let inverted_index = segment_reader.inverted_index(text_field)?;
             assert_eq!(inverted_index.terms().num_terms(), 1);
             let mut bytes = vec![];
-            assert!(inverted_index.terms().ord_to_term(0, &mut bytes));
+            assert!(inverted_index.terms().ord_to_term(0, &mut bytes)?);
             assert_eq!(&bytes[..], ok_token_text.as_bytes());
         }
+        Ok(())
     }
 
     #[test]
-    pub fn test_position_and_fieldnorm1() {
+    pub fn test_position_and_fieldnorm1() -> crate::Result<()> {
         let mut positions = Vec::new();
         let mut schema_builder = Schema::builder();
         let text_field = schema_builder.add_text_field("text", TEXT);
@@ -217,42 +211,38 @@ pub mod tests {
             let mut segment_writer =
                 SegmentWriter::for_segment(3_000_000, segment.clone(), &schema).unwrap();
             {
-                let mut doc = Document::default();
                 // checking that position works if the field has two values
-                doc.add_text(text_field, "a b a c a d a a.");
-                doc.add_text(text_field, "d d d d a");
                 let op = AddOperation {
                     opstamp: 0u64,
-                    document: doc,
+                    document: doc!(
+                       text_field => "a b a c a d a a.",
+                       text_field => "d d d d a"
+                    ),
                 };
-                segment_writer.add_document(op, &schema).unwrap();
+                segment_writer.add_document(op, &schema)?;
             }
             {
-                let mut doc = Document::default();
-                doc.add_text(text_field, "b a");
                 let op = AddOperation {
                     opstamp: 1u64,
-                    document: doc,
+                    document: doc!(text_field => "b a"),
                 };
                 segment_writer.add_document(op, &schema).unwrap();
             }
             for i in 2..1000 {
-                let mut doc = Document::default();
-                let mut text = iter::repeat("e ").take(i).collect::<String>();
+                let mut text: String = iter::repeat("e ").take(i).collect();
                 text.push_str(" a");
-                doc.add_text(text_field, &text);
                 let op = AddOperation {
                     opstamp: 2u64,
-                    document: doc,
+                    document: doc!(text_field => text),
                 };
                 segment_writer.add_document(op, &schema).unwrap();
             }
-            segment_writer.finalize().unwrap();
+            segment_writer.finalize()?;
         }
         {
-            let segment_reader = SegmentReader::open(&segment).unwrap();
+            let segment_reader = SegmentReader::open(&segment)?;
             {
-                let fieldnorm_reader = segment_reader.get_fieldnorms_reader(text_field);
+                let fieldnorm_reader = segment_reader.get_fieldnorms_reader(text_field)?;
                 assert_eq!(fieldnorm_reader.fieldnorm(0), 8 + 5);
                 assert_eq!(fieldnorm_reader.fieldnorm(1), 2);
                 for i in 2..1000 {
@@ -265,15 +255,15 @@ pub mod tests {
             {
                 let term_a = Term::from_field_text(text_field, "abcdef");
                 assert!(segment_reader
-                    .inverted_index(term_a.field())
-                    .read_postings(&term_a, IndexRecordOption::WithFreqsAndPositions)
+                    .inverted_index(term_a.field())?
+                    .read_postings(&term_a, IndexRecordOption::WithFreqsAndPositions)?
                     .is_none());
             }
             {
                 let term_a = Term::from_field_text(text_field, "a");
                 let mut postings_a = segment_reader
-                    .inverted_index(term_a.field())
-                    .read_postings(&term_a, IndexRecordOption::WithFreqsAndPositions)
+                    .inverted_index(term_a.field())?
+                    .read_postings(&term_a, IndexRecordOption::WithFreqsAndPositions)?
                     .unwrap();
                 assert_eq!(postings_a.len(), 1000);
                 assert_eq!(postings_a.doc(), 0);
@@ -295,8 +285,8 @@ pub mod tests {
             {
                 let term_e = Term::from_field_text(text_field, "e");
                 let mut postings_e = segment_reader
-                    .inverted_index(term_e.field())
-                    .read_postings(&term_e, IndexRecordOption::WithFreqsAndPositions)
+                    .inverted_index(term_e.field())?
+                    .read_postings(&term_e, IndexRecordOption::WithFreqsAndPositions)?
                     .unwrap();
                 assert_eq!(postings_e.len(), 1000 - 2);
                 for i in 2u32..1000u32 {
@@ -312,17 +302,18 @@ pub mod tests {
                 assert_eq!(postings_e.doc(), TERMINATED);
             }
         }
+        Ok(())
     }
 
     #[test]
-    pub fn test_position_and_fieldnorm2() {
+    pub fn test_position_and_fieldnorm2() -> crate::Result<()> {
         let mut positions: Vec<u32> = Vec::new();
         let mut schema_builder = Schema::builder();
         let text_field = schema_builder.add_text_field("text", TEXT);
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
         {
-            let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+            let mut index_writer = index.writer_for_tests().unwrap();
             index_writer.add_document(doc!(text_field => "g b b d c g c"));
             index_writer.add_document(doc!(text_field => "g a b b a d c g c"));
             assert!(index_writer.commit().is_ok());
@@ -331,16 +322,17 @@ pub mod tests {
         let searcher = index.reader().unwrap().searcher();
         let segment_reader = searcher.segment_reader(0);
         let mut postings = segment_reader
-            .inverted_index(text_field)
-            .read_postings(&term_a, IndexRecordOption::WithFreqsAndPositions)
+            .inverted_index(text_field)?
+            .read_postings(&term_a, IndexRecordOption::WithFreqsAndPositions)?
             .unwrap();
         assert_eq!(postings.doc(), 1u32);
         postings.positions(&mut positions);
         assert_eq!(&positions[..], &[1u32, 4]);
+        Ok(())
     }
 
     #[test]
-    fn test_skip_next() {
+    fn test_skip_next() -> crate::Result<()> {
         let term_0 = Term::from_field_u64(Field::from_field_id(0), 0);
         let term_1 = Term::from_field_u64(Field::from_field_id(0), 1);
         let term_2 = Term::from_field_u64(Field::from_field_id(0), 2);
@@ -351,10 +343,9 @@ pub mod tests {
             let mut schema_builder = Schema::builder();
             let value_field = schema_builder.add_u64_field("value", INDEXED);
             let schema = schema_builder.build();
-
             let index = Index::create_in_ram(schema);
             {
-                let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+                let mut index_writer = index.writer_for_tests()?;
                 for i in 0u64..num_docs as u64 {
                     let doc = doc!(value_field => 2u64, value_field => i % 2u64);
                     index_writer.add_document(doc);
@@ -363,15 +354,15 @@ pub mod tests {
             }
             index
         };
-        let searcher = index.reader().unwrap().searcher();
+        let searcher = index.reader()?.searcher();
         let segment_reader = searcher.segment_reader(0);
 
         // check that the basic usage works
         for i in 0..num_docs - 1 {
             for j in i + 1..num_docs {
                 let mut segment_postings = segment_reader
-                    .inverted_index(term_2.field())
-                    .read_postings(&term_2, IndexRecordOption::Basic)
+                    .inverted_index(term_2.field())?
+                    .read_postings(&term_2, IndexRecordOption::Basic)?
                     .unwrap();
                 assert_eq!(segment_postings.seek(i), i);
                 assert_eq!(segment_postings.doc(), i);
@@ -383,8 +374,8 @@ pub mod tests {
 
         {
             let mut segment_postings = segment_reader
-                .inverted_index(term_2.field())
-                .read_postings(&term_2, IndexRecordOption::Basic)
+                .inverted_index(term_2.field())?
+                .read_postings(&term_2, IndexRecordOption::Basic)?
                 .unwrap();
 
             // check that `skip_next` advances the iterator
@@ -403,8 +394,8 @@ pub mod tests {
         // check that filtering works
         {
             let mut segment_postings = segment_reader
-                .inverted_index(term_0.field())
-                .read_postings(&term_0, IndexRecordOption::Basic)
+                .inverted_index(term_0.field())?
+                .read_postings(&term_0, IndexRecordOption::Basic)?
                 .unwrap();
 
             for i in 0..num_docs / 2 {
@@ -413,8 +404,8 @@ pub mod tests {
             }
 
             let mut segment_postings = segment_reader
-                .inverted_index(term_0.field())
-                .read_postings(&term_0, IndexRecordOption::Basic)
+                .inverted_index(term_0.field())?
+                .read_postings(&term_0, IndexRecordOption::Basic)?
                 .unwrap();
 
             for i in 0..num_docs / 2 - 1 {
@@ -425,19 +416,19 @@ pub mod tests {
 
         // delete some of the documents
         {
-            let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+            let mut index_writer = index.writer_for_tests()?;
             index_writer.delete_term(term_0);
             assert!(index_writer.commit().is_ok());
         }
-        let searcher = index.reader().unwrap().searcher();
+        let searcher = index.reader()?.searcher();
         assert_eq!(searcher.segment_readers().len(), 1);
         let segment_reader = searcher.segment_reader(0);
 
         // make sure seeking still works
         for i in 0..num_docs {
             let mut segment_postings = segment_reader
-                .inverted_index(term_2.field())
-                .read_postings(&term_2, IndexRecordOption::Basic)
+                .inverted_index(term_2.field())?
+                .read_postings(&term_2, IndexRecordOption::Basic)?
                 .unwrap();
 
             if i % 2 == 0 {
@@ -453,8 +444,8 @@ pub mod tests {
         // now try with a longer sequence
         {
             let mut segment_postings = segment_reader
-                .inverted_index(term_2.field())
-                .read_postings(&term_2, IndexRecordOption::Basic)
+                .inverted_index(term_2.field())?
+                .read_postings(&term_2, IndexRecordOption::Basic)?
                 .unwrap();
 
             let mut last = 2; // start from 5 to avoid seeking to 3 twice
@@ -479,68 +470,20 @@ pub mod tests {
 
         // delete everything else
         {
-            let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+            let mut index_writer = index.writer_for_tests()?;
             index_writer.delete_term(term_1);
             assert!(index_writer.commit().is_ok());
         }
-        let searcher = index.reader().unwrap().searcher();
+        let searcher = index.reader()?.searcher();
 
         // finally, check that it's empty
         {
-            let searchable_segment_ids = index
-                .searchable_segment_ids()
-                .expect("could not get index segment ids");
+            let searchable_segment_ids = index.searchable_segment_ids()?;
             assert!(searchable_segment_ids.is_empty());
             assert_eq!(searcher.num_docs(), 0);
         }
+        Ok(())
     }
-
-    pub static TERM_A: Lazy<Term> = Lazy::new(|| {
-        let field = Field::from_field_id(0);
-        Term::from_field_text(field, "a")
-    });
-    pub static TERM_B: Lazy<Term> = Lazy::new(|| {
-        let field = Field::from_field_id(0);
-        Term::from_field_text(field, "b")
-    });
-    pub static TERM_C: Lazy<Term> = Lazy::new(|| {
-        let field = Field::from_field_id(0);
-        Term::from_field_text(field, "c")
-    });
-    pub static TERM_D: Lazy<Term> = Lazy::new(|| {
-        let field = Field::from_field_id(0);
-        Term::from_field_text(field, "d")
-    });
-
-    pub static INDEX: Lazy<Index> = Lazy::new(|| {
-        let mut schema_builder = Schema::builder();
-        let text_field = schema_builder.add_text_field("text", STRING);
-        let schema = schema_builder.build();
-
-        let mut rng: StdRng = StdRng::from_seed([1u8; 32]);
-
-        let index = Index::create_in_ram(schema);
-        let posting_list_size = 1_000_000;
-        {
-            let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
-            for _ in 0..posting_list_size {
-                let mut doc = Document::default();
-                if rng.gen_bool(1f64 / 15f64) {
-                    doc.add_text(text_field, "a");
-                }
-                if rng.gen_bool(1f64 / 10f64) {
-                    doc.add_text(text_field, "b");
-                }
-                if rng.gen_bool(1f64 / 5f64) {
-                    doc.add_text(text_field, "c");
-                }
-                doc.add_text(text_field, "d");
-                index_writer.add_document(doc);
-            }
-            assert!(index_writer.commit().is_ok());
-        }
-        index
-    });
 
     /// Wraps a given docset, and forward alls call but the
     /// `.skip_next(...)`. This is useful to test that a specialized
@@ -606,14 +549,64 @@ pub mod tests {
 
 #[cfg(all(test, feature = "unstable"))]
 mod bench {
-
-    use super::tests::*;
     use crate::docset::TERMINATED;
     use crate::query::Intersection;
     use crate::schema::IndexRecordOption;
+    use crate::schema::{Document, Field, Schema, Term, STRING};
     use crate::tests;
     use crate::DocSet;
+    use crate::Index;
+    use once_cell::sync::Lazy;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
     use test::{self, Bencher};
+
+    pub static TERM_A: Lazy<Term> = Lazy::new(|| {
+        let field = Field::from_field_id(0);
+        Term::from_field_text(field, "a")
+    });
+    pub static TERM_B: Lazy<Term> = Lazy::new(|| {
+        let field = Field::from_field_id(0);
+        Term::from_field_text(field, "b")
+    });
+    pub static TERM_C: Lazy<Term> = Lazy::new(|| {
+        let field = Field::from_field_id(0);
+        Term::from_field_text(field, "c")
+    });
+    pub static TERM_D: Lazy<Term> = Lazy::new(|| {
+        let field = Field::from_field_id(0);
+        Term::from_field_text(field, "d")
+    });
+
+    pub static INDEX: Lazy<Index> = Lazy::new(|| {
+        let mut schema_builder = Schema::builder();
+        let text_field = schema_builder.add_text_field("text", STRING);
+        let schema = schema_builder.build();
+
+        let mut rng: StdRng = StdRng::from_seed([1u8; 32]);
+
+        let index = Index::create_in_ram(schema);
+        let posting_list_size = 1_000_000;
+        {
+            let mut index_writer = index.writer_for_tests().unwrap();
+            for _ in 0..posting_list_size {
+                let mut doc = Document::default();
+                if rng.gen_bool(1f64 / 15f64) {
+                    doc.add_text(text_field, "a");
+                }
+                if rng.gen_bool(1f64 / 10f64) {
+                    doc.add_text(text_field, "b");
+                }
+                if rng.gen_bool(1f64 / 5f64) {
+                    doc.add_text(text_field, "c");
+                }
+                doc.add_text(text_field, "d");
+                index_writer.add_document(doc);
+            }
+            assert!(index_writer.commit().is_ok());
+        }
+        index
+    });
 
     #[bench]
     fn bench_segment_postings(b: &mut Bencher) {
@@ -624,7 +617,9 @@ mod bench {
         b.iter(|| {
             let mut segment_postings = segment_reader
                 .inverted_index(TERM_A.field())
+                .unwrap()
                 .read_postings(&*TERM_A, IndexRecordOption::Basic)
+                .unwrap()
                 .unwrap();
             while segment_postings.advance() != TERMINATED {}
         });
@@ -638,19 +633,27 @@ mod bench {
         b.iter(|| {
             let segment_postings_a = segment_reader
                 .inverted_index(TERM_A.field())
+                .unwrap()
                 .read_postings(&*TERM_A, IndexRecordOption::Basic)
+                .unwrap()
                 .unwrap();
             let segment_postings_b = segment_reader
                 .inverted_index(TERM_B.field())
+                .unwrap()
                 .read_postings(&*TERM_B, IndexRecordOption::Basic)
+                .unwrap()
                 .unwrap();
             let segment_postings_c = segment_reader
                 .inverted_index(TERM_C.field())
+                .unwrap()
                 .read_postings(&*TERM_C, IndexRecordOption::Basic)
+                .unwrap()
                 .unwrap();
             let segment_postings_d = segment_reader
                 .inverted_index(TERM_D.field())
+                .unwrap()
                 .read_postings(&*TERM_D, IndexRecordOption::Basic)
+                .unwrap()
                 .unwrap();
             let mut intersection = Intersection::new(vec![
                 segment_postings_a,
@@ -670,7 +673,9 @@ mod bench {
 
         let mut segment_postings = segment_reader
             .inverted_index(TERM_A.field())
+            .unwrap()
             .read_postings(&*TERM_A, IndexRecordOption::Basic)
+            .unwrap()
             .unwrap();
 
         let mut existing_docs = Vec::new();
@@ -686,7 +691,9 @@ mod bench {
         b.iter(|| {
             let mut segment_postings = segment_reader
                 .inverted_index(TERM_A.field())
+                .unwrap()
                 .read_postings(&*TERM_A, IndexRecordOption::Basic)
+                .unwrap()
                 .unwrap();
             for doc in &existing_docs {
                 if segment_postings.seek(*doc) == TERMINATED {
@@ -725,12 +732,14 @@ mod bench {
             let n: u32 = test::black_box(17);
             let mut segment_postings = segment_reader
                 .inverted_index(TERM_A.field())
+                .unwrap()
                 .read_postings(&*TERM_A, IndexRecordOption::Basic)
+                .unwrap()
                 .unwrap();
             let mut s = 0u32;
             while segment_postings.doc() != TERMINATED {
                 s += (segment_postings.doc() & n) % 1024;
-                segment_postings.advance()
+                segment_postings.advance();
             }
             s
         });

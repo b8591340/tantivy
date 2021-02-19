@@ -5,7 +5,7 @@ A field needs to be marked as stored in the schema in
 order to be handled in the `Store`.
 
 Internally, documents (or rather their stored fields) are serialized to a buffer.
-When the buffer exceeds 16K, the buffer is compressed using `LZ4`
+When the buffer exceeds 16K, the buffer is compressed using `brotli`, `LZ4` or `snappy`
 and the resulting block is written to disk.
 
 One can then request for a specific `DocId`.
@@ -33,11 +33,14 @@ and should rely on either
 
 !*/
 
+mod index;
 mod reader;
-mod skiplist;
 mod writer;
 pub use self::reader::StoreReader;
 pub use self::writer::StoreWriter;
+
+#[cfg(all(feature = "lz4", feature = "brotli"))]
+compile_error!("feature `lz4` or `brotli` must not be enabled together.");
 
 #[cfg(feature = "lz4")]
 mod compression_lz4;
@@ -46,11 +49,18 @@ pub use self::compression_lz4::COMPRESSION;
 #[cfg(feature = "lz4")]
 use self::compression_lz4::{compress, decompress};
 
-#[cfg(not(feature = "lz4"))]
+#[cfg(feature = "brotli")]
+mod compression_brotli;
+#[cfg(feature = "brotli")]
+pub use self::compression_brotli::COMPRESSION;
+#[cfg(feature = "brotli")]
+use self::compression_brotli::{compress, decompress};
+
+#[cfg(not(any(feature = "lz4", feature = "brotli")))]
 mod compression_snap;
-#[cfg(not(feature = "lz4"))]
+#[cfg(not(any(feature = "lz4", feature = "brotli")))]
 pub use self::compression_snap::COMPRESSION;
-#[cfg(not(feature = "lz4"))]
+#[cfg(not(any(feature = "lz4", feature = "brotli")))]
 use self::compression_snap::{compress, decompress};
 
 #[cfg(test)]
@@ -103,19 +113,18 @@ pub mod tests {
     }
 
     #[test]
-    fn test_store() {
+    fn test_store() -> crate::Result<()> {
         let path = Path::new("store");
-        let mut directory = RAMDirectory::create();
-        let store_file = directory.open_write(path).unwrap();
-        let schema = write_lorem_ipsum_store(store_file, 1_000);
+        let directory = RAMDirectory::create();
+        let store_wrt = directory.open_write(path)?;
+        let schema = write_lorem_ipsum_store(store_wrt, 1_000);
         let field_title = schema.get_field("title").unwrap();
-        let store_source = directory.open_read(path).unwrap();
-        let store = StoreReader::from_source(store_source);
+        let store_file = directory.open_read(path)?;
+        let store = StoreReader::open(store_file)?;
         for i in 0..1_000 {
             assert_eq!(
                 *store
-                    .get(i)
-                    .unwrap()
+                    .get(i)?
                     .get_first(field_title)
                     .unwrap()
                     .text()
@@ -123,6 +132,7 @@ pub mod tests {
                 format!("Doc {}", i)
             );
         }
+        Ok(())
     }
 }
 
@@ -139,7 +149,7 @@ mod bench {
     #[bench]
     #[cfg(feature = "mmap")]
     fn bench_store_encode(b: &mut Bencher) {
-        let mut directory = RAMDirectory::create();
+        let directory = RAMDirectory::create();
         let path = Path::new("store");
         b.iter(|| {
             write_lorem_ipsum_store(directory.open_write(path).unwrap(), 1_000);
@@ -149,11 +159,11 @@ mod bench {
 
     #[bench]
     fn bench_store_decode(b: &mut Bencher) {
-        let mut directory = RAMDirectory::create();
+        let directory = RAMDirectory::create();
         let path = Path::new("store");
         write_lorem_ipsum_store(directory.open_write(path).unwrap(), 1_000);
-        let store_source = directory.open_read(path).unwrap();
-        let store = StoreReader::from_source(store_source);
+        let store_file = directory.open_read(path).unwrap();
+        let store = StoreReader::open(store_file).unwrap();
         b.iter(|| {
             store.get(12).unwrap();
         });

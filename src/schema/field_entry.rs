@@ -1,6 +1,7 @@
-use crate::schema::IntOptions;
 use crate::schema::TextOptions;
+use crate::schema::{is_valid_field_name, IntOptions};
 
+use crate::schema::bytes_options::BytesOptions;
 use crate::schema::FieldType;
 use serde::de::{self, MapAccess, Visitor};
 use serde::ser::SerializeStruct;
@@ -24,6 +25,7 @@ impl FieldEntry {
     /// Creates a new u64 field entry in the schema, given
     /// a name, and some options.
     pub fn new_text(field_name: String, text_options: TextOptions) -> FieldEntry {
+        assert!(is_valid_field_name(&field_name));
         FieldEntry {
             name: field_name,
             field_type: FieldType::Str(text_options),
@@ -33,6 +35,7 @@ impl FieldEntry {
     /// Creates a new u64 field entry in the schema, given
     /// a name, and some options.
     pub fn new_u64(field_name: String, field_type: IntOptions) -> FieldEntry {
+        assert!(is_valid_field_name(&field_name));
         FieldEntry {
             name: field_name,
             field_type: FieldType::U64(field_type),
@@ -42,6 +45,7 @@ impl FieldEntry {
     /// Creates a new i64 field entry in the schema, given
     /// a name, and some options.
     pub fn new_i64(field_name: String, field_type: IntOptions) -> FieldEntry {
+        assert!(is_valid_field_name(&field_name));
         FieldEntry {
             name: field_name,
             field_type: FieldType::I64(field_type),
@@ -51,6 +55,7 @@ impl FieldEntry {
     /// Creates a new f64 field entry in the schema, given
     /// a name, and some options.
     pub fn new_f64(field_name: String, field_type: IntOptions) -> FieldEntry {
+        assert!(is_valid_field_name(&field_name));
         FieldEntry {
             name: field_name,
             field_type: FieldType::F64(field_type),
@@ -60,6 +65,7 @@ impl FieldEntry {
     /// Creates a new date field entry in the schema, given
     /// a name, and some options.
     pub fn new_date(field_name: String, field_type: IntOptions) -> FieldEntry {
+        assert!(is_valid_field_name(&field_name));
         FieldEntry {
             name: field_name,
             field_type: FieldType::Date(field_type),
@@ -68,6 +74,7 @@ impl FieldEntry {
 
     /// Creates a field entry for a facet.
     pub fn new_facet(field_name: String) -> FieldEntry {
+        assert!(is_valid_field_name(&field_name));
         FieldEntry {
             name: field_name,
             field_type: FieldType::HierarchicalFacet,
@@ -75,10 +82,10 @@ impl FieldEntry {
     }
 
     /// Creates a field entry for a bytes field
-    pub fn new_bytes(field_name: String) -> FieldEntry {
+    pub fn new_bytes(field_name: String, bytes_type: BytesOptions) -> FieldEntry {
         FieldEntry {
             name: field_name,
-            field_type: FieldType::Bytes,
+            field_type: FieldType::Bytes(bytes_type),
         }
     }
 
@@ -101,15 +108,16 @@ impl FieldEntry {
             | FieldType::F64(ref options)
             | FieldType::Date(ref options) => options.is_indexed(),
             FieldType::HierarchicalFacet => true,
-            FieldType::Bytes => false,
+            FieldType::Bytes(ref options) => options.is_indexed(),
         }
     }
 
     /// Returns true iff the field is a int (signed or unsigned) fast field
-    pub fn is_int_fast(&self) -> bool {
+    pub fn is_fast(&self) -> bool {
         match self.field_type {
             FieldType::U64(ref options)
             | FieldType::I64(ref options)
+            | FieldType::Date(ref options)
             | FieldType::F64(ref options) => options.is_fast(),
             _ => false,
         }
@@ -125,7 +133,7 @@ impl FieldEntry {
             FieldType::Str(ref options) => options.is_stored(),
             // TODO make stored hierarchical facet optional
             FieldType::HierarchicalFacet => true,
-            FieldType::Bytes => false,
+            FieldType::Bytes(ref options) => options.is_stored(),
         }
     }
 }
@@ -162,8 +170,9 @@ impl Serialize for FieldEntry {
             FieldType::HierarchicalFacet => {
                 s.serialize_field("type", "hierarchical_facet")?;
             }
-            FieldType::Bytes => {
+            FieldType::Bytes(ref options) => {
                 s.serialize_field("type", "bytes")?;
+                s.serialize_field("options", options)?;
             }
         }
 
@@ -214,15 +223,12 @@ impl<'de> Deserialize<'de> for FieldEntry {
                             if ty.is_some() {
                                 return Err(de::Error::duplicate_field("type"));
                             }
-                            let type_string = map.next_value()?;
-                            match type_string {
+                            let type_string = map.next_value::<String>()?;
+                            match type_string.as_str() {
                                 "hierarchical_facet" => {
                                     field_type = Some(FieldType::HierarchicalFacet);
                                 }
-                                "bytes" => {
-                                    field_type = Some(FieldType::Bytes);
-                                }
-                                "text" | "u64" | "i64" | "f64" | "date" => {
+                                "text" | "u64" | "i64" | "f64" | "date" | "bytes" => {
                                     // These types require additional options to create a field_type
                                 }
                                 _ => panic!("unhandled type"),
@@ -235,12 +241,13 @@ impl<'de> Deserialize<'de> for FieldEntry {
                                            specified before `options`";
                                 return Err(de::Error::custom(msg));
                             }
-                            Some(ty) => match ty {
+                            Some(ref ty) => match ty.as_str() {
                                 "text" => field_type = Some(FieldType::Str(map.next_value()?)),
                                 "u64" => field_type = Some(FieldType::U64(map.next_value()?)),
                                 "i64" => field_type = Some(FieldType::I64(map.next_value()?)),
                                 "f64" => field_type = Some(FieldType::F64(map.next_value()?)),
                                 "date" => field_type = Some(FieldType::Date(map.next_value()?)),
+                                "bytes" => field_type = Some(FieldType::Bytes(map.next_value()?)),
                                 _ => {
                                     let msg = format!("Unrecognised type {}", ty);
                                     return Err(de::Error::custom(msg));
@@ -267,6 +274,12 @@ mod tests {
     use super::*;
     use crate::schema::TEXT;
     use serde_json;
+
+    #[test]
+    #[should_panic]
+    fn test_invalid_field_name_should_panic() {
+        FieldEntry::new_text("-hello".to_string(), TEXT);
+    }
 
     #[test]
     fn test_json_serialization() {

@@ -8,7 +8,7 @@ use crate::DocAddress;
 use crate::Term;
 use downcast_rs::impl_downcast;
 use std::collections::BTreeSet;
-use std::fmt;
+use std::{fmt, io};
 
 /// The `Query` trait defines a set of documents and a scoring method
 /// for those documents.
@@ -43,7 +43,7 @@ use std::fmt;
 ///
 /// When implementing a new type of `Query`, it is normal to implement a
 /// dedicated `Query`, `Weight` and `Scorer`.
-pub trait Query: QueryClone + downcast_rs::Downcast + fmt::Debug {
+pub trait Query: QueryClone + Send + Sync + downcast_rs::Downcast + fmt::Debug {
     /// Create the weight associated to a query.
     ///
     /// If scoring is not required, setting `scoring_enabled` to `false`
@@ -76,11 +76,14 @@ pub trait Query: QueryClone + downcast_rs::Downcast + fmt::Debug {
         _terminfo_set: &mut BTreeSet<TermInfo>,
         _term_dict: &TermDictionary,
         _field: Field,
-    ) {
+    ) -> io::Result<()> {
+        Ok(())
     }
 }
 
+/// Implements `box_clone`.
 pub trait QueryClone {
+    /// Returns a boxed clone of `self`.
     fn box_clone(&self) -> Box<dyn Query>;
 }
 
@@ -107,7 +110,7 @@ impl Query for Box<dyn Query> {
         terminfo_set: &mut BTreeSet<TermInfo>,
         term_dict: &TermDictionary,
         field: Field,
-    ) {
+    ) -> io::Result<()> {
         self.as_ref().terminfos(terminfo_set, term_dict, field)
     }
 }

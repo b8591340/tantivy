@@ -26,6 +26,7 @@ impl TextRange {
 }
 
 pub struct TextRangesGenerator;
+
 impl TextRangesGenerator {
     pub fn generate(
         searcher: &Searcher,
@@ -33,14 +34,14 @@ impl TextRangesGenerator {
         field: Field,
         address: DocAddress,
         text: &str,
-    ) -> Vec<TextRange> {
+    ) -> crate::Result<Vec<TextRange>> {
         if text.is_empty() {
-            Vec::new()
+            Ok(Vec::new())
         } else {
             let upper = text.len();
-            let positions = searcher.positions(query, field, address);
+            let positions = searcher.positions(query, field, address)?;
             if positions.is_empty() {
-                TextRange::whole(upper)
+                Ok(TextRange::whole(upper))
             } else {
                 let capacity = positions.len() + positions.len() + 1;
                 let mut ranges = Vec::<TextRange>::with_capacity(capacity);
@@ -66,7 +67,7 @@ impl TextRangesGenerator {
                 }
                 debug_assert!(len <= capacity);
                 unsafe { ranges.set_len(len) }
-                ranges
+                Ok(ranges)
             }
         }
     }
@@ -96,13 +97,13 @@ impl HighlightRangesGenerator {
         address: DocAddress,
         text: &str,
         limit: Option<usize>,
-    ) -> Vec<HighlightRange> {
+    ) -> crate::Result<Vec<HighlightRange>> {
         if text.is_empty() {
-            Vec::new()
+            Ok(Vec::new())
         } else {
-            let positions = searcher.positions(query, field, address);
+            let positions = searcher.positions(query, field, address)?;
             if positions.is_empty() {
-                Vec::new()
+                Ok(Vec::new())
             } else {
                 let mut ranges = Vec::<HighlightRange>::with_capacity(positions.len());
                 let mut token_stream = searcher
@@ -122,7 +123,7 @@ impl HighlightRangesGenerator {
                     }
                 }
                 unsafe { ranges.set_len(len) }
-                ranges
+                Ok(ranges)
             }
         }
     }

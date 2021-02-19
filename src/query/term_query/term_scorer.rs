@@ -253,7 +253,7 @@ mod tests {
     }
 
     fn test_block_wand_aux(term_query: &TermQuery, searcher: &Searcher) -> crate::Result<()> {
-        let term_weight = term_query.specialized_weight(&searcher, true);
+        let term_weight = term_query.specialized_weight(&searcher, true)?;
         for reader in searcher.segment_readers() {
             let mut block_max_scores = vec![];
             let mut block_max_scores_b = vec![];
@@ -302,7 +302,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         writer.set_merge_policy(Box::new(NoMergePolicy));
         for _ in 0..3_000 {
-            let term_freq = rng.gen_range(1, 10000);
+            let term_freq = rng.gen_range(1..10000);
             let words: Vec<&str> = std::iter::repeat("bbbb").take(term_freq).collect();
             let text = words.join(" ");
             writer.add_document(doc!(text_field=>text));

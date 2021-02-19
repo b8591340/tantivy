@@ -9,12 +9,12 @@ pub use self::term_weight::TermWeight;
 #[cfg(test)]
 mod tests {
 
-    use crate::assert_nearly_equals;
     use crate::collector::TopDocs;
     use crate::docset::DocSet;
     use crate::postings::compression::COMPRESSION_BLOCK_SIZE;
     use crate::query::{Query, QueryParser, Scorer, TermQuery};
     use crate::schema::{Field, IndexRecordOption, Schema, STRING, TEXT};
+    use crate::{assert_nearly_equals, DocAddress};
     use crate::{Index, Term, TERMINATED};
 
     #[test]
@@ -25,7 +25,7 @@ mod tests {
         let index = Index::create_in_ram(schema);
         {
             // writing the segment
-            let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+            let mut index_writer = index.writer_for_tests().unwrap();
             let doc = doc!(text_field => "a");
             index_writer.add_document(doc);
             assert!(index_writer.commit().is_ok());
@@ -50,7 +50,7 @@ mod tests {
         let index = Index::create_in_ram(schema);
         {
             // writing the segment
-            let mut index_writer = index.writer_with_num_threads(1, 3_000_000)?;
+            let mut index_writer = index.writer_for_tests()?;
             for _ in 0..COMPRESSION_BLOCK_SIZE {
                 let doc = doc!(text_field => "a");
                 index_writer.add_document(doc);
@@ -86,7 +86,7 @@ mod tests {
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
         {
-            let mut index_writer = index.writer_with_num_threads(1, 10_000_000).unwrap();
+            let mut index_writer = index.writer_for_tests().unwrap();
             index_writer.add_document(doc!(
                 left_field => "left1 left2 left2 left2f2 left2f2 left3 abcde abcde abcde abcde abcde abcde abcde abcde abcde abcewde abcde abcde",
                 right_field => "right1 right2",
@@ -136,7 +136,7 @@ mod tests {
         let text_field = schema_builder.add_text_field("text", TEXT);
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
-        let mut index_writer = index.writer_with_num_threads(1, 5_000_000).unwrap();
+        let mut index_writer = index.writer_for_tests().unwrap();
         index_writer.add_document(doc!(text_field=>"a b"));
         index_writer.add_document(doc!(text_field=>"a c"));
         index_writer.delete_term(Term::from_field_text(text_field, "b"));
@@ -153,7 +153,7 @@ mod tests {
         let text_field = schema_builder.add_text_field("text", TEXT);
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
-        let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+        let mut index_writer = index.writer_for_tests().unwrap();
         index_writer.add_document(doc!(text_field=>"a"));
         index_writer.add_document(doc!(text_field=>"a"));
         index_writer.commit()?;
@@ -178,5 +178,41 @@ mod tests {
             format!("{:?}", term_query),
             "TermQuery(Term(field=1,bytes=[104, 101, 108, 108, 111]))"
         );
+    }
+
+    #[test]
+    fn test_term_query_explain() -> crate::Result<()> {
+        let mut schema_builder = Schema::builder();
+        let text_field = schema_builder.add_text_field("text", TEXT);
+        let schema = schema_builder.build();
+        let index = Index::create_in_ram(schema);
+        let mut index_writer = index.writer_for_tests().unwrap();
+        index_writer.add_document(doc!(text_field=>"b"));
+        index_writer.add_document(doc!(text_field=>"a"));
+        index_writer.add_document(doc!(text_field=>"a"));
+        index_writer.add_document(doc!(text_field=>"b"));
+        index_writer.commit()?;
+        let term_a = Term::from_field_text(text_field, "a");
+        let term_query = TermQuery::new(term_a, IndexRecordOption::Basic);
+        let searcher = index.reader()?.searcher();
+        {
+            let explanation = term_query.explain(&searcher, DocAddress(0u32, 1u32))?;
+            assert_nearly_equals!(explanation.value(), 0.6931472);
+        }
+        {
+            let explanation_err = term_query.explain(&searcher, DocAddress(0u32, 0u32));
+            assert!(matches!(
+                explanation_err,
+                Err(crate::TantivyError::InvalidArgument(_msg))
+            ));
+        }
+        {
+            let explanation_err = term_query.explain(&searcher, DocAddress(0u32, 3u32));
+            assert!(matches!(
+                explanation_err,
+                Err(crate::TantivyError::InvalidArgument(_msg))
+            ));
+        }
+        Ok(())
     }
 }

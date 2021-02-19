@@ -43,7 +43,7 @@ const NUM_MERGE_THREADS: usize = 4;
 /// and flushed.
 ///
 /// This method is not part of tantivy's public API
-pub fn save_new_metas(schema: Schema, directory: &mut dyn Directory) -> crate::Result<()> {
+pub fn save_new_metas(schema: Schema, directory: &dyn Directory) -> crate::Result<()> {
     save_metas(
         &IndexMeta {
             segments: Vec::new(),
@@ -64,7 +64,7 @@ pub fn save_new_metas(schema: Schema, directory: &mut dyn Directory) -> crate::R
 /// and flushed.
 ///
 /// This method is not part of tantivy's public API
-fn save_metas(metas: &IndexMeta, directory: &mut dyn Directory) -> crate::Result<()> {
+fn save_metas(metas: &IndexMeta, directory: &dyn Directory) -> crate::Result<()> {
     info!("save metas");
     let mut buffer = serde_json::to_vec_pretty(metas)?;
     // Just adding a new line at the end of the buffer.
@@ -154,7 +154,7 @@ pub(crate) struct InnerSegmentUpdater {
 
     index: Index,
     segment_manager: SegmentManager,
-    merge_policy: RwLock<Arc<Box<dyn MergePolicy>>>,
+    merge_policy: RwLock<Arc<dyn MergePolicy>>,
     killed: AtomicBool,
     stamper: Stamper,
     merge_operations: MergeOperationInventory,
@@ -193,19 +193,19 @@ impl SegmentUpdater {
             merge_thread_pool,
             index,
             segment_manager,
-            merge_policy: RwLock::new(Arc::new(Box::new(DefaultMergePolicy::default()))),
+            merge_policy: RwLock::new(Arc::new(DefaultMergePolicy::default())),
             killed: AtomicBool::new(false),
             stamper,
             merge_operations: Default::default(),
         })))
     }
 
-    pub fn get_merge_policy(&self) -> Arc<Box<dyn MergePolicy>> {
+    pub fn get_merge_policy(&self) -> Arc<dyn MergePolicy> {
         self.merge_policy.read().unwrap().clone()
     }
 
     pub fn set_merge_policy(&self, merge_policy: Box<dyn MergePolicy>) {
-        let arc_merge_policy = Arc::new(merge_policy);
+        let arc_merge_policy = Arc::from(merge_policy);
         *self.merge_policy.write().unwrap() = arc_merge_policy;
     }
 
@@ -450,9 +450,8 @@ impl SegmentUpdater {
             .into_iter()
             .map(|merge_candidate: MergeCandidate| {
                 MergeOperation::new(&self.merge_operations, commit_opstamp, merge_candidate.0)
-            })
-            .collect::<Vec<_>>();
-        merge_candidates.extend(committed_merge_candidates.into_iter());
+            });
+        merge_candidates.extend(committed_merge_candidates);
 
         for merge_operation in merge_candidates {
             if let Err(err) = self.start_merge(merge_operation) {
@@ -555,7 +554,7 @@ mod tests {
         let index = Index::create_in_ram(schema);
 
         // writing the segment
-        let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+        let mut index_writer = index.writer_for_tests().unwrap();
         index_writer.set_merge_policy(Box::new(MergeWheneverPossible));
 
         {
@@ -608,7 +607,7 @@ mod tests {
         let index = Index::create_in_ram(schema);
 
         // writing the segment
-        let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+        let mut index_writer = index.writer_for_tests().unwrap();
 
         {
             for _ in 0..100 {
@@ -679,7 +678,7 @@ mod tests {
         let index = Index::create_in_ram(schema);
 
         // writing the segment
-        let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+        let mut index_writer = index.writer_for_tests().unwrap();
 
         {
             for _ in 0..100 {

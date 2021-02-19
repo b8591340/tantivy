@@ -111,6 +111,7 @@ mod field_entry;
 mod field_type;
 mod field_value;
 
+mod bytes_options;
 mod field;
 mod index_record_option;
 mod int_options;
@@ -142,6 +143,7 @@ pub use self::text_options::TextOptions;
 pub use self::text_options::STRING;
 pub use self::text_options::TEXT;
 
+pub use self::bytes_options::BytesOptions;
 pub use self::flags::{FAST, INDEXED, STORED};
 pub use self::int_options::Cardinality;
 pub use self::int_options::IntOptions;
@@ -149,14 +151,16 @@ pub use self::int_options::IntOptions;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+/// Regular expression representing the restriction on a valid field names.
+pub const FIELD_NAME_PATTERN: &str = r#"^[_a-zA-Z][_\-a-zA-Z0-9]*$"#;
+
 /// Validator for a potential `field_name`.
 /// Returns true iff the name can be use for a field name.
 ///
 /// A field name must start by a letter `[a-zA-Z]`.
 /// The other characters can be any alphanumic character `[a-ZA-Z0-9]` or `_`.
 pub fn is_valid_field_name(field_name: &str) -> bool {
-    static FIELD_NAME_PTN: Lazy<Regex> =
-        Lazy::new(|| Regex::new("^[a-zA-Z][_a-zA-Z0-9]*$").unwrap());
+    static FIELD_NAME_PTN: Lazy<Regex> = Lazy::new(|| Regex::new(FIELD_NAME_PATTERN).unwrap());
     FIELD_NAME_PTN.is_match(field_name)
 }
 
@@ -170,6 +174,11 @@ mod tests {
         assert!(is_valid_field_name("text"));
         assert!(is_valid_field_name("text0"));
         assert!(!is_valid_field_name("0text"));
+        assert!(is_valid_field_name("field-name"));
+        assert!(is_valid_field_name("field_name"));
+        assert!(!is_valid_field_name("field!name"));
+        assert!(!is_valid_field_name("-fieldname"));
+        assert!(is_valid_field_name("_fieldname"));
         assert!(!is_valid_field_name(""));
         assert!(!is_valid_field_name("シャボン玉"));
         assert!(is_valid_field_name("my_text_field"));

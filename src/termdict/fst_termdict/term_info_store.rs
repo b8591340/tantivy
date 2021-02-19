@@ -1,8 +1,6 @@
-use crate::common::bitpacker::BitPacker;
 use crate::common::compute_num_bits;
-use crate::common::Endianness;
-use crate::common::{BinarySerializable, FixedSize};
-use crate::directory::ReadOnlySource;
+use crate::common::{bitpacker::BitPacker, BinarySerializable, FixedSize};
+use crate::directory::{FileSlice, OwnedBytes};
 use crate::postings::TermInfo;
 use crate::termdict::TermOrdinal;
 use byteorder::{ByteOrder, LittleEndian};
@@ -57,30 +55,40 @@ impl TermInfoBlockMeta {
         self.doc_freq_nbits + self.postings_offset_nbits + self.positions_idx_nbits
     }
 
+    // Here inner_offset is the offset within the block, WITHOUT the first term_info.
+    // In other word, term_info #1,#2,#3 gets inner_offset 0,1,2... While term_info #0
+    // is encoded without bitpacking.
     fn deserialize_term_info(&self, data: &[u8], inner_offset: usize) -> TermInfo {
+        assert!(inner_offset < BLOCK_LEN - 1);
         let num_bits = self.num_bits() as usize;
-        let mut cursor = num_bits * inner_offset;
 
-        let doc_freq = extract_bits(data, cursor, self.doc_freq_nbits) as u32;
-        cursor += self.doc_freq_nbits as usize;
+        let posting_start_addr = num_bits * inner_offset;
+        // the stop offset is the start offset of the next term info.
+        let posting_stop_addr = posting_start_addr + num_bits;
+        let doc_freq_addr = posting_start_addr + self.postings_offset_nbits as usize;
+        let positions_idx_addr = doc_freq_addr + self.doc_freq_nbits as usize;
 
-        let postings_offset = extract_bits(data, cursor, self.postings_offset_nbits);
-        cursor += self.postings_offset_nbits as usize;
-
-        let positions_idx = extract_bits(data, cursor, self.positions_idx_nbits);
+        let postings_start_offset = self.ref_term_info.postings_start_offset
+            + extract_bits(data, posting_start_addr, self.postings_offset_nbits);
+        let postings_stop_offset = self.ref_term_info.postings_start_offset
+            + extract_bits(data, posting_stop_addr, self.postings_offset_nbits);
+        let doc_freq = extract_bits(data, doc_freq_addr, self.doc_freq_nbits) as u32;
+        let positions_idx = self.ref_term_info.positions_idx
+            + extract_bits(data, positions_idx_addr, self.positions_idx_nbits);
 
         TermInfo {
             doc_freq,
-            postings_offset: postings_offset + self.ref_term_info.postings_offset,
-            positions_idx: positions_idx + self.ref_term_info.positions_idx,
+            postings_start_offset,
+            postings_stop_offset,
+            positions_idx,
         }
     }
 }
 
 pub struct TermInfoStore {
     num_terms: usize,
-    block_meta_source: ReadOnlySource,
-    term_info_source: ReadOnlySource,
+    block_meta_bytes: OwnedBytes,
+    term_info_bytes: OwnedBytes,
 }
 
 fn extract_bits(data: &[u8], addr_bits: usize, num_bits: u8) -> u64 {
@@ -105,35 +113,35 @@ fn extract_bits(data: &[u8], addr_bits: usize, num_bits: u8) -> u64 {
 }
 
 impl TermInfoStore {
-    pub fn open(data: &ReadOnlySource) -> TermInfoStore {
-        let buffer = data.as_slice();
-        let len = Endianness::read_u64(&buffer[0..8]) as usize;
-        let num_terms = Endianness::read_u64(&buffer[8..16]) as usize;
-        let block_meta_source = data.slice(16, 16 + len);
-        let term_info_source = data.slice_from(16 + len);
-        TermInfoStore {
+    pub fn open(term_info_store_file: FileSlice) -> crate::Result<TermInfoStore> {
+        let (len_slice, main_slice) = term_info_store_file.split(16);
+        let mut bytes = len_slice.read_bytes()?;
+        let len = u64::deserialize(&mut bytes)? as usize;
+        let num_terms = u64::deserialize(&mut bytes)? as usize;
+        let (block_meta_file, term_info_file) = main_slice.split(len);
+        let term_info_bytes = term_info_file.read_bytes()?;
+        Ok(TermInfoStore {
             num_terms,
-            block_meta_source,
-            term_info_source,
-        }
+            block_meta_bytes: block_meta_file.read_bytes()?,
+            term_info_bytes,
+        })
     }
 
     pub fn get(&self, term_ord: TermOrdinal) -> TermInfo {
         let block_id = (term_ord as usize) / BLOCK_LEN;
-        let buffer = self.block_meta_source.as_slice();
+        let buffer = self.block_meta_bytes.as_slice();
         let mut block_data: &[u8] = &buffer[block_id * TermInfoBlockMeta::SIZE_IN_BYTES..];
         let term_info_block_data = TermInfoBlockMeta::deserialize(&mut block_data)
             .expect("Failed to deserialize terminfoblockmeta");
         let inner_offset = (term_ord as usize) % BLOCK_LEN;
         if inner_offset == 0 {
-            term_info_block_data.ref_term_info
-        } else {
-            let term_info_data = self.term_info_source.as_slice();
-            term_info_block_data.deserialize_term_info(
-                &term_info_data[term_info_block_data.offset as usize..],
-                inner_offset - 1,
-            )
+            return term_info_block_data.ref_term_info;
         }
+        let term_info_data = self.term_info_bytes.as_slice();
+        term_info_block_data.deserialize_term_info(
+            &term_info_data[term_info_block_data.offset as usize..],
+            inner_offset - 1,
+        )
     }
 
     pub fn num_terms(&self) -> usize {
@@ -155,15 +163,16 @@ fn bitpack_serialize<W: Write>(
     term_info: &TermInfo,
 ) -> io::Result<()> {
     bit_packer.write(
+        term_info.postings_start_offset,
+        term_info_block_meta.postings_offset_nbits,
+        write,
+    )?;
+    bit_packer.write(
         u64::from(term_info.doc_freq),
         term_info_block_meta.doc_freq_nbits,
         write,
     )?;
-    bit_packer.write(
-        term_info.postings_offset,
-        term_info_block_meta.postings_offset_nbits,
-        write,
-    )?;
+
     bit_packer.write(
         term_info.positions_idx,
         term_info_block_meta.positions_idx_nbits,
@@ -183,23 +192,27 @@ impl TermInfoStoreWriter {
     }
 
     fn flush_block(&mut self) -> io::Result<()> {
-        if self.term_infos.is_empty() {
-            return Ok(());
-        }
         let mut bit_packer = BitPacker::new();
         let ref_term_info = self.term_infos[0].clone();
+
+        let last_term_info = if let Some(last_term_info) = self.term_infos.last().cloned() {
+            last_term_info
+        } else {
+            return Ok(());
+        };
+        let postings_stop_offset =
+            last_term_info.postings_stop_offset - ref_term_info.postings_start_offset;
         for term_info in &mut self.term_infos[1..] {
-            term_info.postings_offset -= ref_term_info.postings_offset;
+            term_info.postings_start_offset -= ref_term_info.postings_start_offset;
             term_info.positions_idx -= ref_term_info.positions_idx;
         }
 
         let mut max_doc_freq: u32 = 0u32;
-        let mut max_postings_offset: u64 = 0u64;
-        let mut max_positions_idx: u64 = 0u64;
+        let max_postings_offset: u64 = postings_stop_offset;
+        let max_positions_idx: u64 = last_term_info.positions_idx;
+
         for term_info in &self.term_infos[1..] {
             max_doc_freq = cmp::max(max_doc_freq, term_info.doc_freq);
-            max_postings_offset = cmp::max(max_postings_offset, term_info.postings_offset);
-            max_positions_idx = cmp::max(max_positions_idx, term_info.positions_idx);
         }
 
         let max_doc_freq_nbits: u8 = compute_num_bits(u64::from(max_doc_freq));
@@ -224,6 +237,12 @@ impl TermInfoStoreWriter {
             )?;
         }
 
+        bit_packer.write(
+            postings_stop_offset,
+            term_info_block_meta.postings_offset_nbits,
+            &mut self.buffer_term_infos,
+        )?;
+
         // Block need end up at the end of a byte.
         bit_packer.flush(&mut self.buffer_term_infos)?;
         self.term_infos.clear();
@@ -232,6 +251,7 @@ impl TermInfoStoreWriter {
     }
 
     pub fn write_term_info(&mut self, term_info: &TermInfo) -> io::Result<()> {
+        assert!(term_info.postings_stop_offset >= term_info.postings_start_offset);
         self.num_terms += 1u64;
         self.term_infos.push(term_info.clone());
         if self.term_infos.len() >= BLOCK_LEN {
@@ -263,7 +283,7 @@ mod tests {
     use crate::common::bitpacker::BitPacker;
     use crate::common::compute_num_bits;
     use crate::common::BinarySerializable;
-    use crate::directory::ReadOnlySource;
+    use crate::directory::FileSlice;
     use crate::postings::TermInfo;
 
     #[test]
@@ -291,10 +311,11 @@ mod tests {
     #[test]
     fn test_term_info_block_meta_serialization() {
         let term_info_block_meta = TermInfoBlockMeta {
-            offset: 2009,
+            offset: 2009u64,
             ref_term_info: TermInfo {
                 doc_freq: 512,
-                postings_offset: 51,
+                postings_start_offset: 51,
+                postings_stop_offset: 57u64,
                 positions_idx: 3584,
             },
             doc_freq_nbits: 10,
@@ -309,23 +330,31 @@ mod tests {
     }
 
     #[test]
-    fn test_pack() {
+    fn test_pack() -> crate::Result<()> {
         let mut store_writer = TermInfoStoreWriter::new();
         let mut term_infos = vec![];
+        let offset = |i| (i * 13 + i * i) as u64;
         for i in 0..1000 {
             let term_info = TermInfo {
                 doc_freq: i as u32,
-                postings_offset: (i / 10) as u64,
+                postings_start_offset: offset(i),
+                postings_stop_offset: offset(i + 1),
                 positions_idx: (i * 7) as u64,
             };
-            store_writer.write_term_info(&term_info).unwrap();
+            store_writer.write_term_info(&term_info)?;
             term_infos.push(term_info);
         }
         let mut buffer = Vec::new();
-        store_writer.serialize(&mut buffer).unwrap();
-        let term_info_store = TermInfoStore::open(&ReadOnlySource::from(buffer));
+        store_writer.serialize(&mut buffer)?;
+        let term_info_store = TermInfoStore::open(FileSlice::from(buffer))?;
         for i in 0..1000 {
-            assert_eq!(term_info_store.get(i as u64), term_infos[i]);
+            assert_eq!(
+                term_info_store.get(i as u64),
+                term_infos[i],
+                "term info {}",
+                i
+            );
         }
+        Ok(())
     }
 }

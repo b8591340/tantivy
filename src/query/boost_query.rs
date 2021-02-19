@@ -6,7 +6,7 @@ use crate::schema::Field;
 use crate::termdict::TermDictionary;
 use crate::{DocId, DocSet, Score, Searcher, SegmentReader, Term};
 use std::collections::BTreeSet;
-use std::fmt;
+use std::{fmt, io};
 
 /// `BoostQuery` is a wrapper over a query used to boost its score.
 ///
@@ -56,7 +56,7 @@ impl Query for BoostQuery {
         terminfo_set: &mut BTreeSet<TermInfo>,
         term_dict: &TermDictionary,
         field: Field,
-    ) {
+    ) -> io::Result<()> {
         self.query.terminfos(terminfo_set, term_dict, field)
     }
 }
@@ -152,7 +152,7 @@ mod tests {
     fn test_boost_query_explain() {
         let schema = Schema::builder().build();
         let index = Index::create_in_ram(schema);
-        let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+        let mut index_writer = index.writer_for_tests().unwrap();
         index_writer.add_document(Document::new());
         assert!(index_writer.commit().is_ok());
         let reader = index.reader().unwrap();
@@ -161,7 +161,7 @@ mod tests {
         let explanation = query.explain(&searcher, DocAddress(0, 0u32)).unwrap();
         assert_eq!(
             explanation.to_pretty_json(),
-            "{\n  \"value\": 0.2,\n  \"description\": \"Boost x0.2 of ...\",\n  \"details\": [\n    {\n      \"value\": 1.0,\n      \"description\": \"AllQuery\"\n    }\n  ]\n}"
+            "{\n  \"value\": 0.2,\n  \"description\": \"Boost x0.2 of ...\",\n  \"details\": [\n    {\n      \"value\": 1.0,\n      \"description\": \"AllQuery\",\n      \"context\": []\n    }\n  ],\n  \"context\": []\n}"
         )
     }
 }

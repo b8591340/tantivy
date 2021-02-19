@@ -1,8 +1,8 @@
 mod reader;
 mod writer;
 
-pub use self::reader::MultiValueIntFastFieldReader;
-pub use self::writer::MultiValueIntFastFieldWriter;
+pub use self::reader::MultiValuedFastFieldReader;
+pub use self::writer::MultiValuedFastFieldWriter;
 
 #[cfg(test)]
 mod tests {
@@ -25,7 +25,7 @@ mod tests {
         );
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
-        let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+        let mut index_writer = index.writer_for_tests().unwrap();
         index_writer.add_document(doc!(field=>1u64, field=>3u64));
         index_writer.add_document(doc!());
         index_writer.add_document(doc!(field=>4u64));
@@ -64,7 +64,7 @@ mod tests {
             schema_builder.add_i64_field("time_stamp_i", IntOptions::default().set_stored());
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
-        let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+        let mut index_writer = index.writer_for_tests().unwrap();
         let first_time_stamp = chrono::Utc::now();
         index_writer.add_document(
             doc!(date_field=>first_time_stamp, date_field=>first_time_stamp, time_i=>1i64),
@@ -100,6 +100,7 @@ mod tests {
                         .get_first(date_field)
                         .expect("cannot find value")
                         .date_value()
+                        .unwrap()
                         .timestamp(),
                     first_time_stamp.timestamp()
                 );
@@ -108,7 +109,7 @@ mod tests {
                         .get_first(time_i)
                         .expect("cannot find value")
                         .i64_value(),
-                    1i64
+                    Some(1i64)
                 );
             }
         }
@@ -131,6 +132,7 @@ mod tests {
                         .get_first(date_field)
                         .expect("cannot find value")
                         .date_value()
+                        .unwrap()
                         .timestamp(),
                     two_secs_ahead.timestamp()
                 );
@@ -139,7 +141,7 @@ mod tests {
                         .get_first(time_i)
                         .expect("cannot find value")
                         .i64_value(),
-                    3i64
+                    Some(3i64)
                 );
             }
         }
@@ -186,7 +188,7 @@ mod tests {
         );
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
-        let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+        let mut index_writer = index.writer_for_tests().unwrap();
         index_writer.add_document(doc!(field=> 1i64, field => 3i64));
         index_writer.add_document(doc!());
         index_writer.add_document(doc!(field=> -4i64));
@@ -197,22 +199,14 @@ mod tests {
         let segment_reader = searcher.segment_reader(0);
         let mut vals = Vec::new();
         let multi_value_reader = segment_reader.fast_fields().i64s(field).unwrap();
-        {
-            multi_value_reader.get_vals(2, &mut vals);
-            assert_eq!(&vals, &[-4i64]);
-        }
-        {
-            multi_value_reader.get_vals(0, &mut vals);
-            assert_eq!(&vals, &[1i64, 3i64]);
-        }
-        {
-            multi_value_reader.get_vals(1, &mut vals);
-            assert!(vals.is_empty());
-        }
-        {
-            multi_value_reader.get_vals(3, &mut vals);
-            assert_eq!(&vals, &[-5i64, -20i64, 1i64]);
-        }
+        multi_value_reader.get_vals(2, &mut vals);
+        assert_eq!(&vals, &[-4i64]);
+        multi_value_reader.get_vals(0, &mut vals);
+        assert_eq!(&vals, &[1i64, 3i64]);
+        multi_value_reader.get_vals(1, &mut vals);
+        assert!(vals.is_empty());
+        multi_value_reader.get_vals(3, &mut vals);
+        assert_eq!(&vals, &[-5i64, -20i64, 1i64]);
     }
     #[test]
     #[ignore]
@@ -221,7 +215,7 @@ mod tests {
         let field = schema_builder.add_facet_field("facetfield");
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
-        let mut index_writer = index.writer_with_num_threads(1, 3_000_000).unwrap();
+        let mut index_writer = index.writer_for_tests().unwrap();
         for i in 0..100_000 {
             index_writer.add_document(doc!(field=> Facet::from(format!("/lang/{}", i).as_str())));
         }

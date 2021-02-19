@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::*;
+use crate::schema::bytes_options::BytesOptions;
 use serde::de::{SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -160,8 +161,12 @@ impl SchemaBuilder {
     /// some document features at scoring time.
     /// These can be serializing and stored as a bytes field to
     /// get access rapidly when scoring each document.
-    pub fn add_bytes_field(&mut self, field_name: &str) -> Field {
-        let field_entry = FieldEntry::new_bytes(field_name.to_string());
+    pub fn add_bytes_field<T: Into<BytesOptions>>(
+        &mut self,
+        field_name: &str,
+        field_options: T,
+    ) -> Field {
+        let field_entry = FieldEntry::new_bytes(field_name.to_string(), field_options.into());
         self.add_field(field_entry)
     }
 
@@ -381,19 +386,16 @@ impl<'de> Deserialize<'de> for Schema {
 
 /// Error that may happen when deserializing
 /// a document from JSON.
-#[derive(Debug, Fail, PartialEq)]
+#[derive(Debug, Error, PartialEq)]
 pub enum DocParsingError {
     /// The payload given is not valid JSON.
-    #[fail(display = "The provided string is not valid JSON")]
+    #[error("The provided string is not valid JSON")]
     NotJSON(String),
     /// One of the value node could not be parsed.
-    #[fail(display = "The field '{:?}' could not be parsed: {:?}", _0, _1)]
+    #[error("The field '{0:?}' could not be parsed: {1:?}")]
     ValueError(String, ValueParsingError),
     /// The json-document contains a field that is not declared in the schema.
-    #[fail(
-        display = "The document contains a field that is not declared in the schema: {:?}",
-        _0
-    )]
+    #[error("The document contains a field that is not declared in the schema: {0:?}")]
     NoSuchFieldInSchema(String),
 }
 
@@ -559,14 +561,14 @@ mod tests {
             .convert_named_doc(NamedFieldDocument(named_doc_map))
             .unwrap();
         assert_eq!(
-            doc.get_all(title),
+            doc.get_all(title).collect::<Vec<_>>(),
             vec![
                 &Value::from("title1".to_string()),
                 &Value::from("title2".to_string())
             ]
         );
         assert_eq!(
-            doc.get_all(val),
+            doc.get_all(val).collect::<Vec<_>>(),
             vec![&Value::from(14u64), &Value::from(-1i64)]
         );
     }
@@ -627,9 +629,15 @@ mod tests {
                 doc.get_first(author_field).unwrap().text(),
                 Some("fulmicoton")
             );
-            assert_eq!(doc.get_first(count_field).unwrap().u64_value(), 4);
-            assert_eq!(doc.get_first(popularity_field).unwrap().i64_value(), 10);
-            assert_eq!(doc.get_first(score_field).unwrap().f64_value(), 80.5);
+            assert_eq!(doc.get_first(count_field).unwrap().u64_value(), Some(4));
+            assert_eq!(
+                doc.get_first(popularity_field).unwrap().i64_value(),
+                Some(10)
+            );
+            assert_eq!(
+                doc.get_first(score_field).unwrap().f64_value(),
+                Some(80.5f64)
+            );
         }
         {
             let json_err = schema.parse_document(
